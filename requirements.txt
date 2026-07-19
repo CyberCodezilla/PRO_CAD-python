@@ -1,0 +1,33 @@
+# Python CAD Pro - Dependencies
+# GUI Framework
+PyQt6
+PyQt6-Qt6
+
+# Computer Vision & Image Processing
+opencv-python
+opencv-contrib-python
+
+# Numerical Computing
+numpy
+scipy
+
+# 3D Mesh Generation & Manipulation
+trimesh
+networkx
+rtree
+
+# 3D Visualization
+PyOpenGL
+
+# Computational Geometry
+shapely
+scikit-image
+mapbox-earcut
+manifold3d
+
+# File I/O
+Pillow
+
+# Utilities
+python-dateutil
+ezdxf

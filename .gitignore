@@ -1,0 +1,28 @@
+# Python Virtual Environment
+venv/
+.venv/
+ENV/
+
+# Python compiled bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Pytest and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local configuration and logs
+crash_log.txt
+*.log
+.idea/
+.vscode/
+
+# CAD project saves
+*.pcad
+*.stl
+*.obj
+*.3mf
+*.dxf
