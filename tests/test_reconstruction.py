@@ -148,3 +148,71 @@ def test_hollow_pipe_reconstruction():
     # Assert within 1.5% tolerance (since double circle approximations slightly compound area error)
     assert abs(actual_volume - expected_volume) < (0.015 * expected_volume), \
         f"Volume {actual_volume} deviates from expected {expected_volume} by more than 1.5%"
+
+
+def test_view_region_and_guardrails():
+    """Test Case 4: ViewRegion, Centroid Assignment, Local Coordinate Y-Inversion, and Right-Side Mirroring"""
+    from src.engine.cad_engine import CADEngine, ViewRegion, Rectangle, Line, Circle
+    
+    engine = CADEngine()
+    
+    # Define Top Region: (0, 0, 200, 200) -> origin = (0, 200)
+    # Front Region: (0, 300, 200, 500) -> origin = (0, 500)
+    # Right Side Region: (300, 300, 500, 500) -> origin = (300, 500)
+    top_reg = ViewRegion('top', (0.0, 0.0, 200.0, 200.0))
+    front_reg = ViewRegion('front', (0.0, 300.0, 200.0, 500.0))
+    right_side_reg = ViewRegion('right_side', (300.0, 300.0, 500.0, 500.0))
+    
+    engine.add_view_region(top_reg)
+    engine.add_view_region(front_reg)
+    engine.add_view_region(right_side_reg)
+    
+    # Draw a 100x100 rectangle inside Front Region at canvas (50, 350, 100, 100)
+    # Centroid: (100, 400) -> inside Front Region
+    rect_front = Rectangle((50.0, 350.0, 100.0, 100.0))
+    assigned_view = engine.assign_shape_to_region(rect_front)
+    assert assigned_view == 'front', f"Expected 'front', got {assigned_view}"
+    engine.add_shape(rect_front)
+    
+    # Test local coordinate extraction for Front View
+    # Canvas top-left = (50, 350), bottom-left = (50, 450)
+    # Region origin = (0, 500)
+    # Local bottom-left: local_x = 50 - 0 = 50, local_y = 500 - (350+100) = 50
+    local_front = engine.get_local_shapes_for_view('front')
+    assert len(local_front) == 1
+    r_local = local_front[0]['rect']
+    assert r_local == (50.0, 50.0, 100.0, 100.0), f"Unexpected local rect: {r_local}"
+
+    # Draw a rectangle in Right Side View at canvas (350, 350, 100, 100)
+    # Right Side region origin = (300, 500)
+    rect_side = Rectangle((350.0, 350.0, 100.0, 100.0))
+    engine.add_shape(rect_side)
+    local_side = engine.get_local_shapes_for_view('side')
+    assert len(local_side) == 1
+
+    # Draw an unassigned shape outside all regions
+    rect_unassigned = Rectangle((1000.0, 1000.0, 50.0, 50.0))
+    assigned_un = engine.assign_shape_to_region(rect_unassigned)
+    assert assigned_un == 'unassigned'
+    engine.add_shape(rect_unassigned)
+    assert len(engine.get_unassigned_shapes()) == 1
+
+
+def test_alignment_validation():
+    """Test Case 5: Orthographic Alignment Validation Math"""
+    from src.engine.cad_engine import CADEngine, ViewRegion, Rectangle
+    
+    engine = CADEngine()
+    engine.add_view_region(ViewRegion('top', (0, 0, 200, 200)))
+    engine.add_view_region(ViewRegion('front', (0, 300, 200, 500)))
+    
+    # Add Front shape width = 100 (x=50 to 150)
+    engine.add_shape(Rectangle((50, 350, 100, 100)))
+    # Add Top shape width = 80 (x=50 to 130) -> Mismatch > 5.0
+    engine.add_shape(Rectangle((50, 50, 80, 100)))
+    
+    valid, msg = engine.validate_alignment(tolerance=5.0)
+    assert not valid
+    assert "Alignment Error" in msg
+    assert "Front View width is 100.0" in msg
+

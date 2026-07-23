@@ -62,27 +62,15 @@ class MainWindow(QMainWindow):
         self.toolbar = DrawingToolbar(self)
         self.toolbar.tool_selected.connect(self._on_tool_selected)
         self.toolbar.layer_changed.connect(self._on_layer_changed)
+        self.toolbar.view_mode_changed.connect(self._on_view_mode_changed)
         left_panel_layout.addWidget(self.toolbar)
         
-        # 2. 2D Drafting Tabbed Workspace
-        self.tab_widget = QTabWidget()
-        self.canvases = {
-            'top': DrawingCanvas(self.cad_engine, 'top', self),
-            'front': DrawingCanvas(self.cad_engine, 'front', self),
-            'side': DrawingCanvas(self.cad_engine, 'side', self)
-        }
+        # 2. 2D Drafting Unified Orthographic Sheet Workspace
+        self.canvas = DrawingCanvas(self.cad_engine, 'unified', self)
+        self.canvas.mouse_coords_changed.connect(self._on_mouse_coords_changed)
+        self.canvas.shape_drawn.connect(self._trigger_reconstruction)
         
-        self.tab_widget.addTab(self.canvases['top'], "📐 Top View (XZ)")
-        self.tab_widget.addTab(self.canvases['front'], "📐 Front View (XY)")
-        self.tab_widget.addTab(self.canvases['side'], "📐 Side View (ZY)")
-        
-        # Connect signals for coordinate tracking, reconstruction, and guidelines
-        for view_name, canvas in self.canvases.items():
-            canvas.mouse_coords_changed.connect(self._on_mouse_coords_changed)
-            canvas.cursor_moved_in_scene.connect(self._sync_projection_guides)
-            canvas.shape_drawn.connect(self._trigger_reconstruction)
-            
-        left_panel_layout.addWidget(self.tab_widget)
+        left_panel_layout.addWidget(self.canvas)
         content_splitter.addWidget(left_panel_widget)
         
         # 3. Right Panel: 3D OpenGL Viewport
@@ -221,6 +209,12 @@ class MainWindow(QMainWindow):
         self.ortho_action.setChecked(False)
         self.ortho_action.triggered.connect(self._toggle_ortho_mode)
         view_menu.addAction(self.ortho_action)
+
+        # 45° Miter Line toggle
+        self.miter_action = QAction("Show 45° Miter Guide Line", self, checkable=True)
+        self.miter_action.setChecked(True)
+        self.miter_action.triggered.connect(self._toggle_miter_line)
+        view_menu.addAction(self.miter_action)
         
         view_menu.addSeparator()
         
@@ -296,15 +290,21 @@ class MainWindow(QMainWindow):
         """)
 
     def _on_tool_selected(self, tool_name: str):
-        """Sync active tool across all 2D canvases"""
-        for canvas in self.canvases.values():
-            canvas.set_tool(tool_name)
+        """Sync active tool with 2D unified canvas"""
+        self.cad_engine.set_active_tool(tool_name)
+        self.canvas.set_tool(tool_name)
         self.statusBar().showMessage(f"Tool selected: {tool_name.upper()}")
         
     def _on_layer_changed(self, layer_name: str):
         """Sync active layer in cad engine"""
         self.cad_engine.set_active_layer(layer_name)
         self.statusBar().showMessage(f"Active Layer: {layer_name.upper()}")
+
+    def _on_view_mode_changed(self, view_mode_text: str):
+        """Update active view mode in CAD engine and refresh canvas indicators"""
+        self.cad_engine.set_active_view_mode(view_mode_text)
+        self.canvas.rebuild_scene()
+        self.statusBar().showMessage(f"Active View Mode set to: {view_mode_text}")
 
     def _on_mouse_coords_changed(self, x: float, y: float, length: float, angle: float):
         """Update status bar coordinate feedback"""
@@ -353,17 +353,21 @@ class MainWindow(QMainWindow):
             self.command_input.clear()
             return
         elif lower_text in ('clear', 'cls'):
-            active_canvas = self.tab_widget.currentWidget()
-            if active_canvas:
-                self.cad_engine.clear_view(active_canvas.view_name)
-                active_canvas.rebuild_scene()
-                self._trigger_reconstruction()
-                self.statusBar().showMessage(f"Cleared {active_canvas.view_name.capitalize()} View")
+            self.cad_engine.clear_all()
+            self.canvas.rebuild_scene()
+            self._trigger_reconstruction()
+            self.statusBar().showMessage("Cleared All Views")
             self.command_input.clear()
             return
         elif lower_text in ('help', '?', 'h'):
             self._show_help_dialog()
             self.command_input.clear()
+            return
+        elif lower_text in ('region', 'r'):
+            self.toolbar.set_active_tool('region')
+            self._on_tool_selected('region')
+            self.command_input.clear()
+            self.statusBar().showMessage("Active Tool: DEFINE REGION")
             return
         elif lower_text in ('circle', 'c'):
             self.toolbar.set_active_tool('circle')
@@ -404,7 +408,7 @@ class MainWindow(QMainWindow):
         # Parse inputs
         try:
             parts = text.replace(',', ' ').split()
-            active_canvas = self.tab_widget.currentWidget()
+            active_canvas = self.canvas
             
             if not active_canvas:
                 return
@@ -448,25 +452,25 @@ class MainWindow(QMainWindow):
 
     def _trigger_reconstruction(self):
         """Asynchronously trigger the 3D CSG reconstruction process with validation and diagnostics"""
-        # 1. Profile Closure Validation: Block reconstruction if any active sketch has open profiles
-        for view_name, canvas in self.canvases.items():
-            if canvas.has_open_profile():
-                self.statusBar().showMessage(f"❌ Reconstruction Blocked: {view_name.capitalize()} View has open profiles (highlighted in red).")
-                return
-                
-        # 2. Alignment Diagnostics: Check coordinate overlaps and show warning on mismatch
-        aligned, warnings = self._run_alignment_diagnostics()
-        if not aligned:
-            self.statusBar().showMessage(f"⚠ Alignment Warning: {warnings[0]}")
-        else:
-            self.statusBar().showMessage("⚙️ Generating watertight 3D model...")
+        # 1. Alignment Validation (Guardrail 2)
+        valid, msg = self.cad_engine.validate_alignment(tolerance=5.0)
+        if not valid:
+            self.statusBar().showMessage(f"⚠ Alignment Warning: {msg}")
+            QMessageBox.warning(self, "Orthographic Alignment Error", msg)
+            return
+
+        self.statusBar().showMessage("⚙️ Generating watertight 3D model...")
             
-        # 3. Trigger Reconstruction Worker
+        # 2. Extract local shape profiles (Guardrails 1, 3, 4)
         tol = self.tolerance_spin.value() if hasattr(self, 'tolerance_spin') else 10.0
+        top_shapes = self.cad_engine.get_local_shapes_for_view('top')
+        front_shapes = self.cad_engine.get_local_shapes_for_view('front')
+        side_shapes = self.cad_engine.get_local_shapes_for_view('side')
+
         self.reconstructor.run_reconstruction(
-            self.cad_engine.get_shapes('top'),
-            self.cad_engine.get_shapes('front'),
-            self.cad_engine.get_shapes('side'),
+            top_shapes,
+            front_shapes,
+            side_shapes,
             callback_finished=self._on_reconstruction_finished,
             callback_error=self._on_reconstruction_error,
             angular_tolerance=tol
@@ -555,25 +559,26 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Python CAD Pro User Guide", help_text)
             
     def _sync_all_views(self):
-        """Rebuild all canvas views"""
-        for canvas in self.canvases.values():
-            canvas.rebuild_scene()
+        """Rebuild unified canvas view"""
+        self.canvas.rebuild_scene()
 
     def _toggle_grid_snap(self, checked: bool):
         """Toggle grid snap state"""
-        for canvas in self.canvases.values():
-            canvas.set_grid_snap(checked)
+        self.canvas.set_grid_snap(checked)
             
     def _toggle_obj_snap(self, checked: bool):
         """Toggle object snap state"""
-        for canvas in self.canvases.values():
-            canvas.set_object_snap(checked)
+        self.canvas.set_object_snap(checked)
             
     def _toggle_ortho_mode(self, checked: bool):
         """Toggle ortho mode"""
         self.ortho_action.setChecked(checked)
-        for canvas in self.canvases.values():
-            canvas.set_ortho(checked)
+        self.canvas.set_ortho(checked)
+
+    def _toggle_miter_line(self, checked: bool):
+        """Toggle 45 degree miter line visibility"""
+        self.miter_action.setChecked(checked)
+        self.canvas.set_show_miter_line(checked)
 
     def _new_project(self):
         """Clear project workspace"""

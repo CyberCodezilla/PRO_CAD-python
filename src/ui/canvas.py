@@ -113,6 +113,11 @@ class DrawingCanvas(QGraphicsView):
     def set_ortho(self, enabled: bool):
         """Toggle ortho mode"""
         self.ortho_mode = enabled
+
+    def set_show_miter_line(self, enabled: bool):
+        """Toggle 45 degree Miter Line guide visibility"""
+        self.show_miter_line = enabled
+        self.rebuild_scene()
         
     def cancel_current_operation(self):
         """Reset current active drawing state"""
@@ -187,20 +192,138 @@ class DrawingCanvas(QGraphicsView):
         self.scene().update()
 
     def rebuild_scene(self):
-        """Sync scene display with the CADEngine shapes database"""
+        """Sync scene display with the CADEngine shapes database & view regions"""
+        from ..engine.cad_engine import ViewRegion
         self.scene().clear()
         self.temp_item = None
         self.temp_polygon_lines.clear()
         
-        shapes = self.cad_engine.get_shapes(self.view_name)
-        for shape in shapes:
-            self._add_shape_to_scene(shape)
+        # 1. Render View Regions
+        active_mode = self.cad_engine.active_view_mode
+        for key, region in self.cad_engine.view_regions.items():
+            if region.min_x <= -10000.0 or region.max_x >= 10000.0:
+                if region.view_type == 'top':
+                    rx, ry, rw, rh = (-2000.0, -2000.0, 2000.0, 2000.0)
+                    tx, ty = (-390.0, -390.0)
+                elif region.view_type == 'front':
+                    rx, ry, rw, rh = (-2000.0, 0.0, 2000.0, 2000.0)
+                    tx, ty = (-390.0, 10.0)
+                else:
+                    rx, ry, rw, rh = (0.0, 0.0, 2000.0, 2000.0)
+                    tx, ty = (10.0, 10.0)
+            else:
+                rx, ry, rw, rh = (region.min_x, region.min_y, region.width, region.height)
+                tx, ty = (region.min_x + 10, region.min_y + 6)
+
+            rect_item = QGraphicsRectItem(rx, ry, rw, rh)
+            
+            if region.view_type == 'top':
+                color = QColor(40, 167, 69)      # Green for Top View
+                plane_name = "XZ Plane"
+            elif region.view_type == 'front':
+                color = QColor(0, 122, 204)      # Blue for Front View
+                plane_name = "XY Plane"
+            elif region.view_type == 'right_side':
+                color = QColor(230, 81, 0)       # Deep Orange for RHS View
+                plane_name = "ZY Plane (RHS)"
+            else:
+                color = QColor(255, 193, 7)      # Amber/Yellow for LHS View
+                plane_name = "ZY Plane (LHS)"
+                
+            is_active = (active_mode == region.view_type or (active_mode in ['left_side', 'right_side'] and key == 'side'))
+            
+            fill_alpha = 45 if is_active else 20
+            rect_item.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), fill_alpha)))
+            
+            border_width = 2.5 if is_active else 1.5
+            pen_style = Qt.PenStyle.SolidLine if is_active else Qt.PenStyle.DashLine
+            pen = QPen(color, border_width, pen_style)
+            if not is_active:
+                pen.setDashPattern([6, 4])
+            rect_item.setPen(pen)
+            self.scene().addItem(rect_item)
+            
+            # Label header badge in quadrant corner
+            display_name = "LHS View" if region.view_type == 'left_side' else ("RHS View" if region.view_type == 'right_side' else f"{region.view_type.capitalize()} View")
+            active_tag = " [ACTIVE MODE]" if is_active else ""
+            
+            text_item = self.scene().addText(f"📐 {display_name} ({plane_name}){active_tag}")
+            text_item.setDefaultTextColor(color)
+            font = text_item.font()
+            font.setBold(True)
+            font.setPointSize(11)
+            text_item.setFont(font)
+            text_item.setPos(tx, ty)
+
+        # 2. Render Projection Guides & 45° Miter Line
+        self._draw_unified_projection_lines()
+
+        # 3. Render Shapes (Assigned and Unassigned)
+        all_shapes_keys = list(self.cad_engine.shapes.keys())
+        for vk in all_shapes_keys:
+            is_unassigned = (vk == 'unassigned')
+            for shape in self.cad_engine.shapes[vk]:
+                self._add_shape_to_scene(shape, is_unassigned=is_unassigned)
             
         self.scene().update()
+
+    def _draw_unified_projection_lines(self):
+        """Draw orthographic projection alignment guidelines & 45° Miter Line"""
+        top = self.cad_engine.view_regions.get('top')
+        front = self.cad_engine.view_regions.get('front')
+        side = self.cad_engine.view_regions.get('side')
+
+        guide_pen = QPen(QColor('#666666'), 1, Qt.PenStyle.DashLine)
+        guide_pen.setDashPattern([4, 4])
+
+        # Top to Front alignment lines (Width projection)
+        if top and front:
+            l1 = QGraphicsLineItem(top.min_x, top.max_y, front.min_x, front.min_y)
+            l1.setPen(guide_pen)
+            self.scene().addItem(l1)
+            l2 = QGraphicsLineItem(top.max_x, top.max_y, front.max_x, front.min_y)
+            l2.setPen(guide_pen)
+            self.scene().addItem(l2)
+
+        # Front to Side alignment lines (Height projection)
+        if front and side:
+            l1 = QGraphicsLineItem(front.max_x, front.min_y, side.min_x, side.min_y)
+            l1.setPen(guide_pen)
+            self.scene().addItem(l1)
+            l2 = QGraphicsLineItem(front.max_x, front.max_y, side.min_x, side.max_y)
+            l2.setPen(guide_pen)
+            self.scene().addItem(l2)
+
+        # 45° Miter Line projection (Top to Side Depth projection)
+        if getattr(self, 'show_miter_line', True) and top and side:
+            # Junction point at top right edge / origin
+            miter_x = top.max_x
+            miter_y = top.max_y
+            
+            miter_pen = QPen(QColor('#FF8C00'), 1.5, Qt.PenStyle.DashLine)
+            miter_pen.setDashPattern([6, 3])
+            
+            miter_len = max(top.height, side.width) + 80.0
+            # Extends at 45 degrees UP and RIGHT into the empty Top-Right Quadrant
+            miter_line = QGraphicsLineItem(miter_x, miter_y, miter_x + miter_len, miter_y - miter_len)
+            miter_line.setPen(miter_pen)
+            self.scene().addItem(miter_line)
+            
+            label = self.scene().addText("📐 45° Miter Line")
+            label.setDefaultTextColor(QColor('#FF8C00'))
+            font = label.font()
+            font.setBold(True)
+            font.setPointSize(9)
+            label.setFont(font)
+            label.setPos(miter_x + 15, miter_y - 35)
         
-    def _add_shape_to_scene(self, shape: Shape):
+    def _add_shape_to_scene(self, shape: Shape, is_unassigned: bool = False):
         """Construct QGraphicsItem for a Shape data model and style it based on layer"""
-        pen = self._get_pen_for_layer(shape.layer)
+        if is_unassigned:
+            pen = QPen(QColor('#FF3333'), 2, Qt.PenStyle.DashLine)
+        else:
+            pen = self._get_pen_for_layer(shape.layer)
+
         
         if isinstance(shape, Line):
             p1 = QPointF(shape.start[0], shape.start[1])
@@ -614,12 +737,15 @@ class DrawingCanvas(QGraphicsView):
         
         if self.current_tool in ('line', 'dimension'):
             self.temp_item = QGraphicsLineItem(start.x(), start.y(), end.x(), end.y())
-        elif self.current_tool == 'rectangle':
+        elif self.current_tool in ('rectangle', 'region'):
             x = min(start.x(), end.x())
             y = min(start.y(), end.y())
             w = abs(end.x() - start.x())
             h = abs(end.y() - start.y())
             self.temp_item = QGraphicsRectItem(x, y, w, h)
+            if self.current_tool == 'region':
+                pen = QPen(QColor('#FFC107'), 2, Qt.PenStyle.DashLine)
+                pen.setDashPattern([6, 3])
         elif self.current_tool == 'circle':
             # Center and edge radius representation
             self.temp_item = QGraphicsEllipseItem(start.x(), start.y(), 0, 0)
@@ -637,7 +763,7 @@ class DrawingCanvas(QGraphicsView):
         
         if self.current_tool in ('line', 'dimension'):
             self.temp_item.setLine(start.x(), start.y(), end.x(), end.y())
-        elif self.current_tool == 'rectangle':
+        elif self.current_tool in ('rectangle', 'region'):
             x = min(start.x(), end.x())
             y = min(start.y(), end.y())
             w = abs(end.x() - start.x())
@@ -650,13 +776,32 @@ class DrawingCanvas(QGraphicsView):
             self.temp_item.setRect(start.x() - r, start.y() - r, 2 * r, 2 * r)
 
     def _finalize_drawn_shape(self, end: QPointF):
-        """Generate CADEngine model shape and add it to project database"""
+        """Generate CADEngine model shape or ViewRegion and add it to project database"""
+        from ..engine.cad_engine import ViewRegion
         start = self.start_point
         layer = self.cad_engine.active_layer
         
-        if self.current_tool == 'line':
+        if self.current_tool == 'region':
+            x = min(start.x(), end.x())
+            y = min(start.y(), end.y())
+            w = abs(end.x() - start.x())
+            h = abs(end.y() - start.y())
+            if w > 20 and h > 20:
+                item, ok = QInputDialog.getItem(
+                    self,
+                    "Define View Region",
+                    "Select View Region Label:",
+                    ["Top View", "Front View", "Left Side View", "Right Side View"],
+                    0,
+                    False
+                )
+                if ok and item:
+                    region = ViewRegion(item, (x, y, x + w, y + h))
+                    self.cad_engine.add_view_region(region)
+
+        elif self.current_tool == 'line':
             shape = Line((start.x(), start.y()), (end.x(), end.y()), layer)
-            self.cad_engine.add_shape(shape, self.view_name)
+            self.cad_engine.add_shape(shape)
             
         elif self.current_tool == 'rectangle':
             x = min(start.x(), end.x())
@@ -665,7 +810,7 @@ class DrawingCanvas(QGraphicsView):
             h = abs(end.y() - start.y())
             if w > 0.1 and h > 0.1:
                 shape = Rectangle((x, y, w, h), layer)
-                self.cad_engine.add_shape(shape, self.view_name)
+                self.cad_engine.add_shape(shape)
                 
         elif self.current_tool == 'circle':
             dx = end.x() - start.x()
@@ -673,7 +818,7 @@ class DrawingCanvas(QGraphicsView):
             r = np.sqrt(dx*dx + dy*dy)
             if r > 0.1:
                 shape = Circle((start.x(), start.y()), r, layer)
-                self.cad_engine.add_shape(shape, self.view_name)
+                self.cad_engine.add_shape(shape)
                 
         self.rebuild_scene()
 
@@ -1319,7 +1464,7 @@ class DrawingCanvas(QGraphicsView):
             cursor_pos = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
             self.mouseMoveEvent(QMouseEvent(
                 QMouseEvent.Type.MouseMove,
-                self.mapFromScene(cursor_pos),
+                QPointF(self.mapFromScene(cursor_pos)),
                 Qt.MouseButton.NoButton,
                 Qt.MouseButton.NoButton,
                 Qt.KeyboardModifier.ShiftModifier
@@ -1333,7 +1478,7 @@ class DrawingCanvas(QGraphicsView):
             cursor_pos = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
             self.mouseMoveEvent(QMouseEvent(
                 QMouseEvent.Type.MouseMove,
-                self.mapFromScene(cursor_pos),
+                QPointF(self.mapFromScene(cursor_pos)),
                 Qt.MouseButton.NoButton,
                 Qt.MouseButton.NoButton,
                 Qt.KeyboardModifier.NoModifier

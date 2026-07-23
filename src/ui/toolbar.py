@@ -6,14 +6,15 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QIcon
 
 class DrawingToolbar(QWidget):
-    """Vertical toolbar for selecting active drawing tool and CAD layer"""
+    """Vertical toolbar for selecting active drawing tool, CAD layer, and active view mode"""
     
     tool_selected = pyqtSignal(str)
     layer_changed = pyqtSignal(str)
+    view_mode_changed = pyqtSignal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(100)
+        self.setFixedWidth(110)
         self._init_ui()
         
     def _init_ui(self):
@@ -32,7 +33,7 @@ class DrawingToolbar(QWidget):
             QLabel {
                 color: #D4D4D4;
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 10px;
             }
         """)
         
@@ -48,6 +49,7 @@ class DrawingToolbar(QWidget):
         
         tools = [
             ('Select', 'select', '🖱️'),
+            ('Region', 'region', '📐'),
             ('Line', 'line', '📏'),
             ('Rectangle', 'rectangle', '▭'),
             ('Circle', 'circle', '⭕'),
@@ -57,7 +59,7 @@ class DrawingToolbar(QWidget):
         for label, tool_id, icon in tools:
             btn = QPushButton(f"{icon}\n{label}")
             btn.setCheckable(True)
-            btn.setFixedHeight(50)
+            btn.setFixedHeight(46)
             btn.setStyleSheet("""
                 QPushButton {
                     background-color: #2D2D2D;
@@ -86,8 +88,40 @@ class DrawingToolbar(QWidget):
         self.tool_buttons['select'].setChecked(True)
         
         # Separator Line
-        layout.addSpacing(15)
+        layout.addSpacing(10)
         
+        # View Mode Selection Title
+        view_title = QLabel("ACTIVE VIEW")
+        view_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(view_title)
+        
+        self.view_combo = QComboBox()
+        self.view_combo.addItems(["Auto (Centroid)", "Front View", "Top View", "LHS View", "RHS View"])
+        self.view_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2D2D2D;
+                color: #00FFFF;
+                border: 1px solid #3C3C3C;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QComboBox:hover {
+                background-color: #3C3C3C;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2D2D2D;
+                color: #CCCCCC;
+                selection-background-color: #007ACC;
+            }
+        """)
+        self.view_combo.currentTextChanged.connect(self._on_view_mode_changed)
+        layout.addWidget(self.view_combo)
+
+        # Separator Line
+        layout.addSpacing(10)
+
         # Layer Selection Title
         layer_title = QLabel("ACTIVE LAYER")
         layer_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -103,7 +137,7 @@ class DrawingToolbar(QWidget):
                 border: 1px solid #3C3C3C;
                 border-radius: 4px;
                 padding: 4px;
-                font-size: 11px;
+                font-size: 10px;
             }
             QComboBox:hover {
                 background-color: #3C3C3C;
@@ -122,6 +156,10 @@ class DrawingToolbar(QWidget):
     def _on_tool_clicked(self, tool_id: str):
         """Emit signal on tool selection"""
         self.tool_selected.emit(tool_id)
+
+    def _on_view_mode_changed(self, text: str):
+        """Emit view mode change"""
+        self.view_mode_changed.emit(text)
         
     def set_layer(self, layer_name: str):
         """Programmatically select active layer"""

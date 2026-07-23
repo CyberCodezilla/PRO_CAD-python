@@ -140,13 +140,16 @@ class ReconstructionWorker(QThread):
                 final_mesh = trimesh.boolean.intersection(meshes_only)
                 
             # 5. Watertight repair and validation
-            if final_mesh is not None and len(final_mesh.vertices) > 0:
+            if final_mesh is not None and hasattr(final_mesh, 'faces') and len(final_mesh.faces) > 0 and getattr(final_mesh.faces, 'ndim', 0) == 2:
                 print("🔧 Repairing reconstructed solid mesh...")
-                trimesh.repair.fill_holes(final_mesh)
-                trimesh.repair.fix_normals(final_mesh)
-                final_mesh.fill_holes()
-                final_mesh.fix_normals()
-                print(f"✓ Watertight check: {final_mesh.is_watertight}")
+                try:
+                    trimesh.repair.fill_holes(final_mesh)
+                    trimesh.repair.fix_normals(final_mesh)
+                    final_mesh.fill_holes()
+                    final_mesh.fix_normals()
+                    print(f"✓ Watertight check: {getattr(final_mesh, 'is_watertight', False)}")
+                except Exception as e:
+                    print(f"Warning during final mesh repair: {e}")
                 
             self.finished_reconstruction.emit(final_mesh)
             
@@ -155,27 +158,34 @@ class ReconstructionWorker(QThread):
             print(f"❌ Error during reconstruction: {e}\n{tb}")
             self.error_occurred.emit(tb)
  
-    def _prepare_mesh(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    def _prepare_mesh(self, mesh: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
         """Ensure mesh is watertight and has outward-pointing face normals (positive volume)"""
-        trimesh.repair.fill_holes(mesh)
-        trimesh.repair.fix_normals(mesh)
-        mesh.fill_holes()
-        mesh.fix_normals()
-        # Fallback orientation check
-        if mesh.volume < 0:
-            mesh.invert()
+        if mesh is None or not hasattr(mesh, 'faces') or len(mesh.faces) == 0 or getattr(mesh.faces, 'ndim', 0) != 2:
+            return None
+        try:
+            trimesh.repair.fill_holes(mesh)
             trimesh.repair.fix_normals(mesh)
+            mesh.fill_holes()
             mesh.fix_normals()
+            # Fallback orientation check
+            if hasattr(mesh, 'volume') and mesh.volume < 0:
+                mesh.invert()
+                trimesh.repair.fix_normals(mesh)
+                mesh.fix_normals()
+        except Exception as e:
+            print(f"Warning during mesh repair: {e}")
         return mesh
 
     def _extrude_profile(self, poly: sg.base.BaseGeometry, height: float) -> Optional[trimesh.Trimesh]:
         """Extrude a Shapely Polygon or MultiPolygon along local Z-axis by height"""
-        if poly is None or poly.is_empty:
+        if poly is None or poly.is_empty or getattr(poly, 'area', 0) <= 1e-6:
             return None
             
         if isinstance(poly, sg.Polygon):
             try:
-                return trimesh.creation.extrude_polygon(poly, height)
+                mesh = trimesh.creation.extrude_polygon(poly, height)
+                if mesh is not None and hasattr(mesh, 'faces') and len(mesh.faces) > 0 and getattr(mesh.faces, 'ndim', 0) == 2:
+                    return mesh
             except Exception as e:
                 print(f"Error extruding single Polygon: {e}")
                 return None
@@ -183,10 +193,10 @@ class ReconstructionWorker(QThread):
         elif isinstance(poly, sg.MultiPolygon):
             meshes = []
             for p in poly.geoms:
-                if p is not None and not p.is_empty:
+                if p is not None and not p.is_empty and getattr(p, 'area', 0) > 1e-6:
                     try:
                         m = trimesh.creation.extrude_polygon(p, height)
-                        if m is not None:
+                        if m is not None and hasattr(m, 'faces') and len(m.faces) > 0 and getattr(m.faces, 'ndim', 0) == 2:
                             meshes.append(m)
                     except Exception as e:
                         print(f"Error extruding sub-polygon of MultiPolygon: {e}")
@@ -421,9 +431,9 @@ class Reconstructor3D:
             self.worker.wait()
             
         # Serialize shapes list to dictionary before handoff (thread-safe copies)
-        top_dicts = [s.to_dict() for s in top_shapes]
-        front_dicts = [s.to_dict() for s in front_shapes]
-        side_dicts = [s.to_dict() for s in side_shapes]
+        top_dicts = [s if isinstance(s, dict) else s.to_dict() for s in top_shapes]
+        front_dicts = [s if isinstance(s, dict) else s.to_dict() for s in front_shapes]
+        side_dicts = [s if isinstance(s, dict) else s.to_dict() for s in side_shapes]
         
         self.worker = ReconstructionWorker(top_dicts, front_dicts, side_dicts, angular_tolerance)
         self.worker.finished_reconstruction.connect(callback_finished)

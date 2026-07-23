@@ -1,5 +1,5 @@
 """
-CAD Engine - Core data model and shape management with history stack
+CAD Engine - Core data model and shape management with history stack & unified orthographic regions.
 """
 import uuid
 import numpy as np
@@ -157,25 +157,119 @@ class Dimension(Shape):
         }
 
 
+class ViewRegion:
+    """Defined region on the unified orthographic drafting sheet"""
+    
+    def __init__(self, view_type: str, bounds: Tuple[float, float, float, float], region_id: str = None):
+        """
+        view_type: 'top', 'front', 'side', 'left_side', 'right_side', 'lhs', 'rhs'
+        bounds: (min_x, min_y, max_x, max_y)
+        """
+        self.id = region_id if region_id else str(uuid.uuid4())
+        self.view_type = view_type.lower()
+        
+        # Standardize view_type names
+        if self.view_type in ['top view', 'top']:
+            self.view_type = 'top'
+        elif self.view_type in ['front view', 'front']:
+            self.view_type = 'front'
+        elif self.view_type in ['left side view', 'left side', 'left_side', 'lhs view', 'lhs', 'side', 'side view']:
+            self.view_type = 'left_side'
+        elif self.view_type in ['right side view', 'right side', 'right_side', 'rhs view', 'rhs']:
+            self.view_type = 'right_side'
+            
+        x1, y1, x2, y2 = bounds
+        self.min_x = float(min(x1, x2))
+        self.min_y = float(min(y1, y2))
+        self.max_x = float(max(x1, x2))
+        self.max_y = float(max(y1, y2))
+        
+        # Guardrail 1: Origin defined as Bottom-Left corner (0,0 if infinite quadrant)
+        if self.min_x <= -10000.0 or self.max_x >= 10000.0:
+            self.origin = (0.0, 0.0)
+        else:
+            self.origin = (self.min_x, self.max_y)
+
+    @property
+    def width(self) -> float:
+        return self.max_x - self.min_x
+
+    @property
+    def height(self) -> float:
+        return self.max_y - self.min_y
+
+    def contains_point(self, pt: Tuple[float, float]) -> bool:
+        """Check if 2D canvas point lies inside region bounds"""
+        x, y = pt
+        return (self.min_x <= x <= self.max_x) and (self.min_y <= y <= self.max_y)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'view_type': self.view_type,
+            'bounds': (self.min_x, self.min_y, self.max_x, self.max_y),
+            'origin': self.origin
+        }
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> 'ViewRegion':
+        return ViewRegion(d['view_type'], tuple(d['bounds']), d.get('id'))
+
+
+def get_shape_centroid(shape: Shape) -> Tuple[float, float]:
+    """Guardrail 3: Calculate 2D centroid of a shape"""
+    if isinstance(shape, Line):
+        return ((shape.start[0] + shape.end[0]) / 2.0, (shape.start[1] + shape.end[1]) / 2.0)
+    elif isinstance(shape, Rectangle):
+        x, y, w, h = shape.rect
+        return (x + w / 2.0, y + h / 2.0)
+    elif isinstance(shape, Circle) or isinstance(shape, Arc):
+        return shape.center
+    elif isinstance(shape, Polygon):
+        if not shape.points:
+            return (0.0, 0.0)
+        xs = [p[0] for p in shape.points]
+        ys = [p[1] for p in shape.points]
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
+    elif isinstance(shape, Dimension):
+        return ((shape.start_pt[0] + shape.end_pt[0]) / 2.0, (shape.start_pt[1] + shape.end_pt[1]) / 2.0)
+    return (0.0, 0.0)
+
+
 class CADEngine:
-    """Core CAD engine for managing shapes and drawing operations with undo/redo"""
+    """Core CAD engine for managing shapes, view regions, and drawing operations with undo/redo"""
     
     def __init__(self):
         self.shapes: Dict[str, List[Shape]] = {
             'top': [],
             'front': [],
-            'side': []
+            'side': [],
+            'unassigned': []
         }
+        self.view_regions: Dict[str, ViewRegion] = {}
         self.active_tool: str = 'select'
         self.active_layer: str = 'Visible'  # 'Visible', 'Hidden', 'Construction'
+        self.active_view_mode: str = 'auto'  # 'auto', 'top', 'front', 'left_side', 'right_side'
         
-        self.history: List[Tuple[str, Dict[str, List[Dict[str, Any]]]]] = []
+        # Pre-initialize standard orthographic quadrant view regions on sheet
+        self.init_default_quadrant_regions()
+
+        self.history: List[Tuple[str, Dict[str, Any]]] = []
         self.history_index: int = -1
         self.max_history: int = 100
         
         # Save baseline empty state
         self._save_state("Initial State")
         
+    def init_default_quadrant_regions(self):
+        """Initialize standard 4-quadrant orthographic drafting sheet layout (infinite quadrant bounds)"""
+        # Top-Left Quadrant: Top View
+        self.view_regions['top'] = ViewRegion('top', (-50000.0, -50000.0, 0.0, 0.0))
+        # Bottom-Left Quadrant: Front View
+        self.view_regions['front'] = ViewRegion('front', (-50000.0, 0.0, 0.0, 50000.0))
+        # Bottom-Right Quadrant: Left Side / LHS View
+        self.view_regions['side'] = ViewRegion('left_side', (0.0, 0.0, 50000.0, 50000.0))
+
     def set_active_tool(self, tool_name: str):
         """Set active drawing tool"""
         self.active_tool = tool_name
@@ -183,37 +277,98 @@ class CADEngine:
     def set_active_layer(self, layer_name: str):
         """Set active drawing layer"""
         self.active_layer = layer_name
+
+    def set_active_view_mode(self, view_mode: str):
+        """Set active view mode ('auto', 'top', 'front', 'left_side', 'right_side', 'side')"""
+        mode = view_mode.lower()
+        if mode in ['lhs', 'lhs view', 'left side view', 'left_side']:
+            self.active_view_mode = 'left_side'
+        elif mode in ['rhs', 'rhs view', 'right side view', 'right_side']:
+            self.active_view_mode = 'right_side'
+        elif mode in ['top', 'top view']:
+            self.active_view_mode = 'top'
+        elif mode in ['front', 'front view']:
+            self.active_view_mode = 'front'
+        else:
+            self.active_view_mode = 'auto'
+
+    def add_view_region(self, region: ViewRegion):
+        """Add or update a ViewRegion and re-assign existing shapes"""
+        key = 'side' if region.view_type in ['left_side', 'right_side'] else region.view_type
+        self.view_regions[key] = region
+        self.reassign_all_shapes()
+        self._save_state(f"Add {region.view_type.replace('_', ' ').title()} Region")
+
+    def remove_view_region(self, view_key: str):
+        """Remove a ViewRegion"""
+        if view_key in self.view_regions:
+            del self.view_regions[view_key]
+            self.reassign_all_shapes()
+            self._save_state(f"Remove {view_key.capitalize()} Region")
+
+    def assign_shape_to_region(self, shape: Shape) -> str:
+        """
+        Guardrail 3: Assign a shape to a ViewRegion based on its centroid.
+        Returns the region key ('top', 'front', 'side', or 'unassigned').
+        """
+        centroid = get_shape_centroid(shape)
+        for key, region in self.view_regions.items():
+            if region.contains_point(centroid):
+                return key
+        return 'unassigned'
         
-    def add_shape(self, shape: Shape, view: str):
-        """Add a shape to the specified view"""
-        if view not in self.shapes:
-            return
+    def add_shape(self, shape: Shape, view: Optional[str] = None):
+        """Add a shape to the specified view, active view mode, or auto-assign via centroid"""
+        target_view = view
+        if not target_view:
+            if self.active_view_mode != 'auto':
+                target_view = 'side' if self.active_view_mode in ['left_side', 'right_side'] else self.active_view_mode
+                # Ensure region matches view mode if user explicitly selected LHS/RHS
+                if self.active_view_mode in ['left_side', 'right_side'] and 'side' in self.view_regions:
+                    self.view_regions['side'].view_type = self.active_view_mode
+            else:
+                target_view = self.assign_shape_to_region(shape)
             
-        self.shapes[view].append(shape)
-        self._save_state(f"Draw {shape.type.capitalize()} on {self.active_layer} in {view.capitalize()} View")
-        
-    def remove_shape(self, shape_id: str, view: str) -> bool:
-        """Remove a shape by ID from the specified view"""
-        if view not in self.shapes:
-            return False
+        if target_view not in self.shapes:
+            self.shapes[target_view] = []
             
-        initial_len = len(self.shapes[view])
-        # Find shape type for descriptive undo
-        shape_type = "Shape"
-        for s in self.shapes[view]:
-            if s.id == shape_id:
-                shape_type = s.type.capitalize()
-                break
-        self.shapes[view] = [s for s in self.shapes[view] if s.id != shape_id]
+        self.shapes[target_view].append(shape)
+        self._save_state(f"Draw {shape.type.capitalize()} on {self.active_layer} in {target_view.capitalize()} View")
+
+    def reassign_all_shapes(self):
+        """Re-evaluate region assignment for all existing shapes based on centroid"""
+        all_existing_shapes = []
+        for key in list(self.shapes.keys()):
+            all_existing_shapes.extend(self.shapes[key])
+            self.shapes[key] = []
+            
+        self.shapes['unassigned'] = []
         
-        if len(self.shapes[view]) < initial_len:
-            self._save_state(f"Remove {shape_type} in {view.capitalize()} View")
-            return True
+        for shape in all_existing_shapes:
+            target_view = self.assign_shape_to_region(shape)
+            if target_view not in self.shapes:
+                self.shapes[target_view] = []
+            self.shapes[target_view].append(shape)
+            
+    def remove_shape(self, shape_id: str, view: Optional[str] = None) -> bool:
+        """Remove a shape by ID"""
+        views_to_search = [view] if view and view in self.shapes else list(self.shapes.keys())
+        
+        for v in views_to_search:
+            initial_len = len(self.shapes[v])
+            self.shapes[v] = [s for s in self.shapes[v] if s.id != shape_id]
+            if len(self.shapes[v]) < initial_len:
+                self._save_state(f"Remove Shape from {v.capitalize()} View")
+                return True
         return False
         
     def get_shapes(self, view: str) -> List[Shape]:
         """Get all shapes for a view"""
         return self.shapes.get(view, [])
+
+    def get_unassigned_shapes(self) -> List[Shape]:
+        """Get shapes not inside any ViewRegion"""
+        return self.shapes.get('unassigned', [])
         
     def clear_view(self, view: str):
         """Clear all shapes from a view"""
@@ -222,18 +377,21 @@ class CADEngine:
             self._save_state(f"Clear {view.capitalize()} View")
             
     def clear_all(self):
-        """Clear all shapes from all views"""
+        """Clear all shapes and re-init default regions"""
         self.shapes = {
             'top': [],
             'front': [],
-            'side': []
+            'side': [],
+            'unassigned': []
         }
+        self.view_regions = {}
+        self.init_default_quadrant_regions()
         self.history = []
         self.history_index = -1
         self._save_state("Clear All")
         
     def undo(self) -> Tuple[bool, str]:
-        """Undo last action, returns (success, description)"""
+        """Undo last action"""
         if self.history_index > 0:
             undone_desc = self.history[self.history_index][0]
             self.history_index -= 1
@@ -242,7 +400,7 @@ class CADEngine:
         return False, ""
             
     def redo(self) -> Tuple[bool, str]:
-        """Redo last undone action, returns (success, description)"""
+        """Redo last undone action"""
         if self.history_index < len(self.history) - 1:
             self.history_index += 1
             self._load_state_from_history()
@@ -251,40 +409,41 @@ class CADEngine:
         return False, ""
             
     def _save_state(self, description: str = "State Change"):
-        """Save current state for undo/redo via serialization"""
-        # Automatically update associative dimensions for all views
-        for view in ['top', 'front', 'side']:
+        """Save current state for undo/redo"""
+        for view in self.shapes.keys():
             self.update_associative_dimensions(view)
             
-        # Trim history after current index
         self.history = self.history[:self.history_index + 1]
         
-        # Save serialized representation of shapes
         state = {
-            'top': [s.to_dict() for s in self.shapes['top']],
-            'front': [s.to_dict() for s in self.shapes['front']],
-            'side': [s.to_dict() for s in self.shapes['side']]
+            'shapes': {v: [s.to_dict() for s in self.shapes[v]] for v in self.shapes},
+            'regions': {k: r.to_dict() for k, r in self.view_regions.items()}
         }
         
         self.history.append((description, state))
         self.history_index += 1
         
-        # Limit history size
         if len(self.history) > self.max_history:
             self.history.pop(0)
             self.history_index -= 1
             
     def _load_state_from_history(self):
-        """Restore shapes from serialized history state"""
+        """Restore shapes and regions from history state"""
         description, state = self.history[self.history_index]
-        self.shapes = {
-            'top': [Shape.from_dict(s) for s in state['top']],
-            'front': [Shape.from_dict(s) for s in state['front']],
-            'side': [Shape.from_dict(s) for s in state['side']]
-        }
-        
+        if 'shapes' in state:
+            self.shapes = {v: [Shape.from_dict(s) for s in state['shapes'][v]] for v in state['shapes']}
+            self.view_regions = {k: ViewRegion.from_dict(r) for k, r in state.get('regions', {}).items()}
+        else:
+            # Legacy fallback
+            self.shapes = {
+                'top': [Shape.from_dict(s) for s in state.get('top', [])],
+                'front': [Shape.from_dict(s) for s in state.get('front', [])],
+                'side': [Shape.from_dict(s) for s in state.get('side', [])],
+                'unassigned': []
+            }
+            
     def update_associative_dimensions(self, view: str):
-        """Update any dimension coordinates linked to modified shapes in a view"""
+        """Update dimension text linked to target shapes"""
         if view not in self.shapes:
             return
             
@@ -307,11 +466,7 @@ class CADEngine:
                             dy = target.end[1] - target.start[1]
                             dist = np.sqrt(dx*dx + dy*dy)
                             dim.text = f"{dist:.1f}"
-                        elif target.type == 'circle':
-                            dim.start_pt = target.center
-                            dim.end_pt = (target.center[0] + target.radius, target.center[1])
-                            dim.text = f"R{target.radius:.1f}"
-                        elif target.type == 'arc':
+                        elif target.type in ['circle', 'arc']:
                             dim.start_pt = target.center
                             dim.end_pt = (target.center[0] + target.radius, target.center[1])
                             dim.text = f"R{target.radius:.1f}"
@@ -327,7 +482,7 @@ class CADEngine:
                         dy = pt2[1] - pt1[1]
                         dist = np.sqrt(dx*dx + dy*dy)
                         dim.text = f"{dist:.1f}"
-                        
+
     def get_shape_bounds(self, shape: Shape) -> Optional[Tuple[float, float, float, float]]:
         """Get bounding box of a shape as (min_x, min_y, max_x, max_y)"""
         if isinstance(shape, Line):
@@ -362,50 +517,108 @@ class CADEngine:
             return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
             
         return None
+
+    def get_local_shapes_for_view(self, view_key: str) -> List[Dict[str, Any]]:
+        """
+        Guardrails 1 & 4: Extract shapes converted to local coordinates.
+        - Bottom-left origin (x0, y0)
+        - Y-inversion: local_y = y0 - abs_y
+        - Right-side view mirroring: local_x = x0 - abs_x for right_side view
+        """
+        shapes = self.shapes.get(view_key, [])
+        region = self.view_regions.get(view_key)
         
-    def shape_to_points(self, shape: Shape, num_points: int = 100) -> np.ndarray:
-        """Convert shape boundary to array of points for CV processing"""
-        if isinstance(shape, Line):
-            x1, y1 = shape.start
-            x2, y2 = shape.end
-            t = np.linspace(0, 1, num_points)
-            x = x1 + t * (x2 - x1)
-            y = y1 + t * (y2 - y1)
-            return np.column_stack([x, y])
+        # Default origin fallback if region not explicitly defined
+        if region:
+            x0, y0 = region.origin
+            is_right_side = (region.view_type == 'right_side')
+        else:
+            # Fallback bounds of shapes in view
+            all_bounds = [self.get_shape_bounds(s) for s in shapes if self.get_shape_bounds(s) is not None]
+            if all_bounds:
+                min_xs = [b[0] for b in all_bounds]
+                max_ys = [b[3] for b in all_bounds]
+                x0 = min(min_xs)
+                y0 = max(max_ys)
+            else:
+                x0, y0 = (0.0, 0.0)
+            is_right_side = False
+
+        local_shapes = []
+        for shape in shapes:
+            d = shape.to_dict()
+            t = d.get('type')
             
-        elif isinstance(shape, Circle):
-            cx, cy = shape.center
-            r = shape.radius
-            theta = np.linspace(0, 2 * np.pi, num_points)
-            x = cx + r * np.cos(theta)
-            y = cy + r * np.sin(theta)
-            return np.column_stack([x, y])
+            # Helper to map absolute point (px, py) -> (lx, ly)
+            def map_pt(px: float, py: float) -> Tuple[float, float]:
+                lx = (x0 - px) if is_right_side else (px - x0)
+                ly = y0 - py  # Y-inversion: canvas Y grows down, local 3D Y grows up
+                return (lx, ly)
+                
+            if t == 'line':
+                d['start'] = map_pt(d['start'][0], d['start'][1])
+                d['end'] = map_pt(d['end'][0], d['end'][1])
+            elif t == 'rectangle':
+                x, y, w, h = d['rect']
+                lx1, ly1 = map_pt(x, y + h)  # bottom-left
+                lx2, ly2 = map_pt(x + w, y)  # top-right
+                lx_min = min(lx1, lx2)
+                ly_min = min(ly1, ly2)
+                d['rect'] = (lx_min, ly_min, abs(w), abs(h))
+            elif t in ['circle', 'arc']:
+                d['center'] = map_pt(d['center'][0], d['center'][1])
+            elif t == 'polygon':
+                d['points'] = [map_pt(p[0], p[1]) for p in d['points']]
+            elif t == 'dimension':
+                d['start_pt'] = map_pt(d['start_pt'][0], d['start_pt'][1])
+                d['end_pt'] = map_pt(d['end_pt'][0], d['end_pt'][1])
+                d['label_pt'] = map_pt(d['label_pt'][0], d['label_pt'][1])
+                
+            local_shapes.append(d)
             
-        elif isinstance(shape, Rectangle):
-            x, y, w, h = shape.rect
-            pts_per_side = num_points // 4
-            top = np.column_stack([np.linspace(x, x + w, pts_per_side), np.full(pts_per_side, y)])
-            right = np.column_stack([np.full(pts_per_side, x + w), np.linspace(y, y + h, pts_per_side)])
-            bottom = np.column_stack([np.linspace(x + w, x, pts_per_side), np.full(pts_per_side, y + h)])
-            left = np.column_stack([np.full(pts_per_side, x), np.linspace(y + h, y, pts_per_side)])
-            return np.vstack([top, right, bottom, left])
-            
-        elif isinstance(shape, Polygon):
-            return np.array(shape.points)
-            
-        elif isinstance(shape, Arc):
-            cx, cy = shape.center
-            r = shape.radius
-            theta1 = np.radians(shape.start_angle)
-            theta2 = np.radians(shape.end_angle)
-            if theta2 < theta1:
-                theta2 += 2 * np.pi
-            theta = np.linspace(theta1, theta2, num_points)
-            x = cx + r * np.cos(theta)
-            y = cy + r * np.sin(theta)
-            return np.column_stack([x, y])
-            
-        elif isinstance(shape, Dimension):
-            return np.array([])
-            
-        return np.array([])
+        return local_shapes
+
+    def validate_alignment(self, tolerance: float = 5.0) -> Tuple[bool, str]:
+        """
+        Guardrail 2: Verify standard orthographic alignment across Top, Front, and Side views.
+        - Top Width (max_x - min_x) == Front Width (max_x - min_x)
+        - Front Height (max_y - min_y) == Side Height (max_y - min_y)
+        - Top View Depth (Top Region Height) == Side View Depth (Side Region Width)
+        """
+        def get_view_span(view_key: str) -> Optional[Tuple[float, float, float, float]]:
+            shapes = self.shapes.get(view_key, [])
+            all_bounds = [self.get_shape_bounds(s) for s in shapes if self.get_shape_bounds(s) is not None]
+            if not all_bounds:
+                return None
+            min_x = min(b[0] for b in all_bounds)
+            min_y = min(b[1] for b in all_bounds)
+            max_x = max(b[2] for b in all_bounds)
+            max_y = max(b[3] for b in all_bounds)
+            return (min_x, min_y, max_x, max_y)
+
+        top_span = get_view_span('top')
+        front_span = get_view_span('front')
+        side_span = get_view_span('side')
+
+        # Check Top vs Front Width
+        if top_span and front_span:
+            top_width = top_span[2] - top_span[0]
+            front_width = front_span[2] - front_span[0]
+            if abs(top_width - front_width) > tolerance:
+                return False, f"Alignment Error: Front View width is {front_width:.1f}mm, but Top View width is {top_width:.1f}mm."
+
+        # Check Front vs Side Height
+        if front_span and side_span:
+            front_height = front_span[3] - front_span[1]
+            side_height = side_span[3] - side_span[1]
+            if abs(front_height - side_height) > tolerance:
+                return False, f"Alignment Error: Front View height is {front_height:.1f}mm, but Side View height is {side_height:.1f}mm."
+
+        # Guardrail 2: Check Top Depth vs Side Depth
+        if top_span and side_span:
+            top_depth = top_span[3] - top_span[1]
+            side_depth = side_span[2] - side_span[0]
+            if abs(top_depth - side_depth) > tolerance:
+                return False, f"Alignment Error: Top View depth is {top_depth:.1f}mm, but Side View depth is {side_depth:.1f}mm."
+
+        return True, "Orthographic alignment validated successfully."
