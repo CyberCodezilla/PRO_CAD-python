@@ -216,3 +216,39 @@ def test_alignment_validation():
     assert "Alignment Error" in msg
     assert "Front View width is 100.0" in msg
 
+
+def test_rules_engine_evaluations():
+    """Test Case 6: Geometry RulesEngine - Alignment, Profile Closure, Projection Detection, Micro-Gaps"""
+    from src.engine.cad_engine import CADEngine, ViewRegion, Rectangle, Line
+    from src.engine.rules_engine import RulesEngine, DiagnosticSeverity
+
+    engine = CADEngine()
+    engine.add_view_region(ViewRegion('top', (-200, -200, 0, 0)))
+    engine.add_view_region(ViewRegion('front', (-200, 0, 0, 200)))
+    engine.add_view_region(ViewRegion('side', (0, 0, 200, 200)))
+
+    # Add misaligned Top & Front Rectangles
+    engine.add_shape(Rectangle((-150, -150, 100, 100)))  # Top Width 100
+    engine.add_shape(Rectangle((-150, 50, 80, 100)))     # Front Width 80
+
+    rules_engine = RulesEngine(epsilon=0.1, alignment_tolerance=2.0)
+    diags = rules_engine.evaluate_all(engine.shapes, engine.view_regions)
+
+    rule_ids = [d.rule_id for d in diags]
+    assert "RULE_PROJ_TYPE" in rule_ids
+    assert "RULE_ALIGN_WIDTH" in rule_ids
+
+    # Find width alignment diagnostic
+    align_diag = [d for d in diags if d.rule_id == "RULE_ALIGN_WIDTH"][0]
+    assert align_diag.severity == DiagnosticSeverity.ERROR
+    assert align_diag.fix_action == "auto_scale_top_width"
+
+    # Test Auto-Fix
+    success = engine.apply_autofix(align_diag)
+    assert success
+
+    # Re-evaluate rules after auto-fix
+    diags_after = rules_engine.evaluate_all(engine.shapes, engine.view_regions)
+    rule_ids_after = [d.rule_id for d in diags_after]
+    assert "RULE_ALIGN_WIDTH" not in rule_ids_after
+

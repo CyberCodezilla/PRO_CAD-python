@@ -13,12 +13,13 @@ from PyQt6.QtWidgets import (
     QSlider, QDoubleSpinBox, QFormLayout, QDialog, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, QPointF
-from PyQt6.QtGui import QAction, QKeySequence, QCursor
+from PyQt6.QtGui import QAction, QKeySequence, QCursor, QColor, QBrush
 
 from .canvas import DrawingCanvas
 from .toolbar import DrawingToolbar
 from .viewport_3d import OpenGLViewport
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
+from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
 from ..reconstruction.reconstructor import Reconstructor3D
 
 class MainWindow(QMainWindow):
@@ -31,7 +32,9 @@ class MainWindow(QMainWindow):
         
         # Core Models & Engines
         self.cad_engine = CADEngine()
+        self.rules_engine = RulesEngine()
         self.reconstructor = Reconstructor3D()
+        self.current_diagnostics: List[Diagnostic] = []
         
         self._init_ui()
         self._create_menus()
@@ -452,14 +455,13 @@ class MainWindow(QMainWindow):
 
     def _trigger_reconstruction(self):
         """Asynchronously trigger the 3D CSG reconstruction process with validation and diagnostics"""
-        # 1. Alignment Validation (Guardrail 2)
-        valid, msg = self.cad_engine.validate_alignment(tolerance=5.0)
-        if not valid:
-            self.statusBar().showMessage(f"⚠ Alignment Warning: {msg}")
-            QMessageBox.warning(self, "Orthographic Alignment Error", msg)
+        # 1. Evaluate CAD Doctor RulesEngine
+        is_valid, proj_type = self._run_diagnostics_and_update_doctor()
+        if not is_valid:
+            self.statusBar().showMessage("❌ Reconstruction Blocked: CAD Doctor identified geometry errors. See panel below.")
             return
 
-        self.statusBar().showMessage("⚙️ Generating watertight 3D model...")
+        self.statusBar().showMessage(f"⚙️ Generating watertight 3D model ({proj_type.upper()})...")
             
         # 2. Extract local shape profiles (Guardrails 1, 3, 4)
         tol = self.tolerance_spin.value() if hasattr(self, 'tolerance_spin') else 10.0
@@ -473,7 +475,8 @@ class MainWindow(QMainWindow):
             side_shapes,
             callback_finished=self._on_reconstruction_finished,
             callback_error=self._on_reconstruction_error,
-            angular_tolerance=tol
+            angular_tolerance=tol,
+            projection_type=proj_type
         )
 
     def _on_reconstruction_finished(self, mesh):
@@ -758,6 +761,133 @@ class MainWindow(QMainWindow):
         controls_layout.addStretch()
         self.controls_dock.setWidget(controls_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.controls_dock)
+
+        # 3. CAD Doctor Diagnostic Dock (Bottom Dockable Widget)
+        self.doctor_dock = QDockWidget("CAD Doctor — Diagnostics & Suggestions", self)
+        self.doctor_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea)
+        
+        doctor_container = QWidget()
+        doctor_container.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        doctor_layout = QVBoxLayout(doctor_container)
+        doctor_layout.setContentsMargins(6, 6, 6, 6)
+        doctor_layout.setSpacing(6)
+        
+        self.doctor_tree = QTreeWidget()
+        self.doctor_tree.setHeaderLabels(["Severity", "Rule Title", "Description", "Suggestion"])
+        self.doctor_tree.setStyleSheet("""
+            QTreeWidget {
+                background-color: #252526;
+                color: #D4D4D4;
+                border: 1px solid #3C3C3C;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #2D2D2D;
+                color: #00FFFF;
+                font-weight: bold;
+                border: 1px solid #3C3C3C;
+                padding: 4px;
+            }
+        """)
+        self.doctor_tree.setColumnWidth(0, 95)
+        self.doctor_tree.setColumnWidth(1, 200)
+        self.doctor_tree.setColumnWidth(2, 380)
+        self.doctor_tree.itemSelectionChanged.connect(self._on_doctor_item_selected)
+        doctor_layout.addWidget(self.doctor_tree)
+        
+        btn_bar = QHBoxLayout()
+        self.autofix_btn = QPushButton("🔧 Apply Auto-Fix")
+        self.autofix_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007ACC;
+                color: #FFFFFF;
+                border: 1px solid #0099FF;
+                padding: 5px 12px;
+                font-weight: bold;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #0099FF;
+            }
+            QPushButton:disabled {
+                background-color: #3A3A3A;
+                color: #777777;
+                border-color: #444444;
+            }
+        """)
+        self.autofix_btn.setEnabled(False)
+        self.autofix_btn.clicked.connect(self._on_apply_autofix)
+        btn_bar.addWidget(self.autofix_btn)
+        btn_bar.addStretch()
+        
+        doctor_layout.addLayout(btn_bar)
+        self.doctor_dock.setWidget(doctor_container)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.doctor_dock)
+
+    def _run_diagnostics_and_update_doctor(self) -> Tuple[bool, str]:
+        """Run RulesEngine and populate CAD Doctor dock list"""
+        self.doctor_tree.clear()
+        self.current_diagnostics = self.rules_engine.evaluate_all(self.cad_engine.shapes, self.cad_engine.view_regions)
+        
+        has_error = False
+        proj_type = '3rd_angle'
+
+        for diag in self.current_diagnostics:
+            if diag.rule_id == "RULE_PROJ_TYPE" and diag.fix_data:
+                proj_type = diag.fix_data.get('projection_type', '3rd_angle')
+
+            if diag.severity == DiagnosticSeverity.ERROR:
+                sev_str = "❌ ERROR"
+                color = "#FF3333"
+                has_error = True
+            elif diag.severity == DiagnosticSeverity.WARNING:
+                sev_str = "⚠️ WARNING"
+                color = "#FF8C00"
+            else:
+                sev_str = "ℹ️ INFO"
+                color = "#00FFFF"
+
+            item = QTreeWidgetItem([sev_str, diag.title, diag.description, diag.suggestion])
+            item.setForeground(0, QBrush(QColor(color)))
+            item.setData(0, Qt.ItemDataRole.UserRole, diag)
+            self.doctor_tree.addTopLevelItem(item)
+
+        self.autofix_btn.setEnabled(len(self.current_diagnostics) > 0)
+        return (not has_error), proj_type
+
+    def _on_doctor_item_selected(self):
+        """Highlight shapes associated with selected diagnostic item"""
+        selected = self.doctor_tree.selectedItems()
+        if not selected:
+            self.canvas.clear_highlights()
+            return
+        
+        diag: Diagnostic = selected[0].data(0, Qt.ItemDataRole.UserRole)
+        if diag and diag.mismatched_shape_ids:
+            self.canvas.highlight_shapes(diag.mismatched_shape_ids)
+            self.statusBar().showMessage(f"Highlighted {len(diag.mismatched_shape_ids)} shape(s) for: {diag.title}")
+        else:
+            self.canvas.clear_highlights()
+
+    def _on_apply_autofix(self):
+        """Apply auto-fix for selected diagnostic item"""
+        selected = self.doctor_tree.selectedItems()
+        if not selected:
+            self.statusBar().showMessage("Please select a diagnostic item to auto-fix.")
+            return
+
+        diag: Diagnostic = selected[0].data(0, Qt.ItemDataRole.UserRole)
+        if diag and diag.fix_action:
+            success = self.cad_engine.apply_autofix(diag)
+            if success:
+                self.canvas.clear_highlights()
+                self.canvas.rebuild_scene()
+                self._run_diagnostics_and_update_doctor()
+                self.statusBar().showMessage(f"✓ Applied Auto-Fix: {diag.title}")
+            else:
+                self.statusBar().showMessage("Auto-Fix action not supported for this item.")
+        else:
+            self.statusBar().showMessage("No Auto-Fix available for selected item.")
 
     def _on_clip_toggled(self, state):
         """Toggle OpenGL clipping planes status"""

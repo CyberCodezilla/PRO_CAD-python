@@ -275,8 +275,84 @@ class CADEngine:
         self.active_tool = tool_name
         
     def set_active_layer(self, layer_name: str):
-        """Set active drawing layer"""
+        """Set active drawing layer ('Visible', 'Hidden', 'Construction', 'Centerline')"""
         self.active_layer = layer_name
+
+    def apply_autofix(self, diagnostic) -> bool:
+        """Apply mathematical auto-fix for a specific diagnostic suggestion"""
+        if not diagnostic or not getattr(diagnostic, 'fix_action', None):
+            return False
+            
+        action = diagnostic.fix_action
+        data = diagnostic.fix_data or {}
+        
+        if action == 'auto_scale_top_width':
+            target_w = data.get('target_width')
+            curr_w = data.get('current_width')
+            if target_w and curr_w and curr_w > 0:
+                scale_x = target_w / curr_w
+                top_shapes = self.shapes.get('top', [])
+                if top_shapes:
+                    min_x = min([s.rect[0] if isinstance(s, Rectangle) else (s.center[0] - s.radius if isinstance(s, Circle) else s.start[0]) for s in top_shapes])
+                    for s in top_shapes:
+                        if isinstance(s, Line):
+                            s.start = (min_x + (s.start[0] - min_x) * scale_x, s.start[1])
+                            s.end = (min_x + (s.end[0] - min_x) * scale_x, s.end[1])
+                        elif isinstance(s, Rectangle):
+                            x, y, w, h = s.rect
+                            s.rect = (min_x + (x - min_x) * scale_x, y, w * scale_x, h)
+                        elif isinstance(s, Circle):
+                            cx, cy = s.center
+                            s.center = (min_x + (cx - min_x) * scale_x, cy)
+                            s.radius = s.radius * scale_x
+                    self._save_state("Auto-Fix: Scale Top View Width")
+                    return True
+                    
+        elif action == 'auto_scale_side_height':
+            target_h = data.get('target_height')
+            curr_h = data.get('current_height')
+            if target_h and curr_h and curr_h > 0:
+                scale_y = target_h / curr_h
+                side_shapes = self.shapes.get('side', [])
+                if side_shapes:
+                    min_y = min([s.rect[1] if isinstance(s, Rectangle) else (s.center[1] - s.radius if isinstance(s, Circle) else s.start[1]) for s in side_shapes])
+                    for s in side_shapes:
+                        if isinstance(s, Line):
+                            s.start = (s.start[0], min_y + (s.start[1] - min_y) * scale_y)
+                            s.end = (s.end[0], min_y + (s.end[1] - min_y) * scale_y)
+                        elif isinstance(s, Rectangle):
+                            x, y, w, h = s.rect
+                            s.rect = (x, min_y + (y - min_y) * scale_y, w, h * scale_y)
+                        elif isinstance(s, Circle):
+                            cx, cy = s.center
+                            s.center = (cx, min_y + (cy - min_y) * scale_y)
+                            s.radius = s.radius * scale_y
+                    self._save_state("Auto-Fix: Scale Side View Height")
+                    return True
+
+        elif action == 'auto_scale_side_depth':
+            target_d = data.get('target_depth')
+            curr_d = data.get('current_depth')
+            if target_d and curr_d and curr_d > 0:
+                scale_x = target_d / curr_d
+                side_shapes = self.shapes.get('side', [])
+                if side_shapes:
+                    min_x = min([s.rect[0] if isinstance(s, Rectangle) else (s.center[0] - s.radius if isinstance(s, Circle) else s.start[0]) for s in side_shapes])
+                    for s in side_shapes:
+                        if isinstance(s, Line):
+                            s.start = (min_x + (s.start[0] - min_x) * scale_x, s.start[1])
+                            s.end = (min_x + (s.end[0] - min_x) * scale_x, s.end[1])
+                        elif isinstance(s, Rectangle):
+                            x, y, w, h = s.rect
+                            s.rect = (min_x + (x - min_x) * scale_x, y, w * scale_x, h)
+                        elif isinstance(s, Circle):
+                            cx, cy = s.center
+                            s.center = (min_x + (cx - min_x) * scale_x, cy)
+                            s.radius = s.radius * scale_x
+                    self._save_state("Auto-Fix: Scale Side View Depth")
+                    return True
+
+        return False
 
     def set_active_view_mode(self, view_mode: str):
         """Set active view mode ('auto', 'top', 'front', 'left_side', 'right_side', 'side')"""

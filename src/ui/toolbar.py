@@ -129,7 +129,7 @@ class DrawingToolbar(QWidget):
         
         # Layer Dropdown ComboBox
         self.layer_combo = QComboBox()
-        self.layer_combo.addItems(["Visible", "Hidden", "Construction"])
+        self.layer_combo.addItems(["Visible", "Hidden", "Centerline", "Construction"])
         self.layer_combo.setStyleSheet("""
             QComboBox {
                 background-color: #2D2D2D;

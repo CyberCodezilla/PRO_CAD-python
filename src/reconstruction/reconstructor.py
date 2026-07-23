@@ -19,12 +19,32 @@ class ReconstructionWorker(QThread):
     finished_reconstruction = pyqtSignal(object)  # Emits trimesh.Trimesh
     error_occurred = pyqtSignal(str)              # Emits traceback string
     
-    def __init__(self, top_shapes: List[Dict[str, Any]], front_shapes: List[Dict[str, Any]], side_shapes: List[Dict[str, Any]], angular_tolerance: float = 10.0):
+    def __init__(self, top_shapes: List[Dict[str, Any]], front_shapes: List[Dict[str, Any]], side_shapes: List[Dict[str, Any]], angular_tolerance: float = 10.0, projection_type: str = '3rd_angle'):
         super().__init__()
         self.top_shapes = top_shapes
         self.front_shapes = front_shapes
         self.side_shapes = side_shapes
         self.angular_tolerance = angular_tolerance
+        self.projection_type = projection_type
+
+    def run_reconstruction(self, top_shapes: List[Shape], front_shapes: List[Shape], side_shapes: List[Shape], callback_finished, callback_error=None, angular_tolerance: float = 10.0, projection_type: str = '3rd_angle'):
+        """Spawn ReconstructionWorker in a background thread to generate 3D mesh"""
+        # Cancel any active running workers
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.terminate()
+            self.worker.wait()
+            
+        # Serialize shapes list to dictionary before handoff (thread-safe copies)
+        top_dicts = [s if isinstance(s, dict) else s.to_dict() for s in top_shapes]
+        front_dicts = [s if isinstance(s, dict) else s.to_dict() for s in front_shapes]
+        side_dicts = [s if isinstance(s, dict) else s.to_dict() for s in side_shapes]
+        
+        self.worker = ReconstructionWorker(top_dicts, front_dicts, side_dicts, angular_tolerance, projection_type)
+        self.worker.finished_reconstruction.connect(callback_finished)
+        if callback_error:
+            self.worker.error_occurred.connect(callback_error)
+            
+        self.worker.start()
         
     def run(self):
         """Execute reconstruction pipeline"""
@@ -423,7 +443,7 @@ class Reconstructor3D:
             
         return (min(horiz_vals), max(horiz_vals), min(vert_vals), max(vert_vals))
         
-    def run_reconstruction(self, top_shapes: List[Shape], front_shapes: List[Shape], side_shapes: List[Shape], callback_finished, callback_error=None, angular_tolerance: float = 10.0):
+    def run_reconstruction(self, top_shapes: List[Shape], front_shapes: List[Shape], side_shapes: List[Shape], callback_finished, callback_error=None, angular_tolerance: float = 10.0, projection_type: str = '3rd_angle'):
         """Spawn ReconstructionWorker in a background thread to generate 3D mesh"""
         # Cancel any active running workers
         if self.worker is not None and self.worker.isRunning():
@@ -435,7 +455,7 @@ class Reconstructor3D:
         front_dicts = [s if isinstance(s, dict) else s.to_dict() for s in front_shapes]
         side_dicts = [s if isinstance(s, dict) else s.to_dict() for s in side_shapes]
         
-        self.worker = ReconstructionWorker(top_dicts, front_dicts, side_dicts, angular_tolerance)
+        self.worker = ReconstructionWorker(top_dicts, front_dicts, side_dicts, angular_tolerance, projection_type)
         self.worker.finished_reconstruction.connect(callback_finished)
         if callback_error:
             self.worker.error_occurred.connect(callback_error)

@@ -322,7 +322,7 @@ class DrawingCanvas(QGraphicsView):
         if is_unassigned:
             pen = QPen(QColor('#FF3333'), 2, Qt.PenStyle.DashLine)
         else:
-            pen = self._get_pen_for_layer(shape.layer)
+            pen = self._get_pen_for_layer(shape.layer, getattr(shape, 'id', None))
 
         
         if isinstance(shape, Line):
@@ -440,8 +440,11 @@ class DrawingCanvas(QGraphicsView):
         rect = text_item.boundingRect()
         text_item.setPos(mid.x() - rect.width() / 2, mid.y() - rect.height() - 2)
             
-    def _get_pen_for_layer(self, layer: str) -> QPen:
-        """Get pen color and style for drawing depending on layer"""
+    def _get_pen_for_layer(self, layer: str, shape_id: str = None) -> QPen:
+        """Get pen color and style for drawing depending on layer and diagnostic highlight state"""
+        if hasattr(self, 'highlighted_shape_ids') and shape_id in self.highlighted_shape_ids:
+            return QPen(QColor('#FF0033'), 3, Qt.PenStyle.SolidLine)
+
         if layer == 'Visible':
             return QPen(QColor('#00FFFF'), 2, Qt.PenStyle.SolidLine)
         elif layer == 'Hidden':
@@ -449,9 +452,23 @@ class DrawingCanvas(QGraphicsView):
             pen = QPen(QColor('#00FFFF'), 2, Qt.PenStyle.DashLine)
             pen.setDashPattern([4, 2])
             return pen
+        elif layer == 'Centerline':
+            # Magenta Dash-Dot lines for symmetry axes
+            pen = QPen(QColor('#FF00FF'), 1.5, Qt.PenStyle.DashDotLine)
+            return pen
         elif layer == 'Construction':
             return QPen(QColor('#555555'), 1, Qt.PenStyle.SolidLine)
         return QPen(QColor('#FFFFFF'), 1, Qt.PenStyle.SolidLine)
+
+    def highlight_shapes(self, shape_ids: List[str]):
+        """Visually highlight specific shape IDs on the 2D scene in bright red"""
+        self.highlighted_shape_ids = set(shape_ids)
+        self.rebuild_scene()
+
+    def clear_highlights(self):
+        """Clear shape highlights"""
+        self.highlighted_shape_ids = set()
+        self.rebuild_scene()
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """Render drafting background grid and axes efficiently inside the exposed viewport rect"""
