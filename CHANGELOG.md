@@ -9,3 +9,4 @@
 - [2026-07-27T16:44:43 +0530] perf(viewport): optimize PyOpenGL VBO data uploads during dynamic orbit
 - [2026-07-27T17:30:53 +0530] feat(reconstruction): implement 2D slice plane extraction from 3D boundary representation
 - [2026-07-27T19:06:55 +0530] fix(viewport): prevent memory leak when re-initializing PyOpenGL VAOs
+- [2026-07-27T20:41:57 +0530] feat(toolbar): add quick tooltips and dynamic status bar coordinate display
