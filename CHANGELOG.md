@@ -6,3 +6,4 @@
 - [2026-07-27T14:48:46 +0530] refactor(reconstruction): extract mesh triangulation into dedicated helper package
 - [2026-07-27T15:46:15 +0530] docs(project): record milestone completion for Phase 2 reconstruction pipeline
 - [2026-07-27T15:50:28 +0530] feat(canvas): implement snap-to-grid functionality for line and arc creation
+- [2026-07-27T16:44:43 +0530] perf(viewport): optimize PyOpenGL VBO data uploads during dynamic orbit
