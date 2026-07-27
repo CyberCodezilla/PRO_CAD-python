@@ -29,3 +29,4 @@
 - [2026-07-27T12:16:24 +0530] fix(canvas): resolve zoom origin offset on high-DPI display scale factors
 - [2026-07-27T12:32:11 +0530] fix(engine): resolve numerical instability in line-arc intersection solver
 - [2026-07-27T15:04:58 +0530] feat(canvas): implement snap-to-grid functionality for line and arc creation
+- [2026-07-27T15:25:21 +0530] docs(readme): update system prerequisites, build instructions, and PySide6 setup
