@@ -9,7 +9,7 @@ import numpy as np
 from typing import Optional
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtCore import Qt, QPointF
-from PyQt6.QtGui import QMouseEvent, QWheelEvent
+from PyQt6.QtGui import QMouseEvent, QWheelEvent, QCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QPushButton, QWidget, QFrame
 )
@@ -31,6 +31,7 @@ class OpenGLViewport(QOpenGLWidget):
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.last_mouse_pos = QPointF()
+        self._is_panning = False
 
         # VAO and VBO buffers
         self._vao = None
@@ -460,12 +461,15 @@ class OpenGLViewport(QOpenGLWidget):
 
     # 360° Unclamped Mouse Controls
     def mousePressEvent(self, event: QMouseEvent):
-        """Store mouse coordinates on click"""
+        """Start rotation or viewport panning from the corresponding mouse button."""
         self.last_mouse_pos = event.position()
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._is_panning = True
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        """Rotate camera unclamped 360° on Left-Click drag, pan camera on Right-Click drag"""
+        """Rotate with left drag and pan with middle or right drag."""
         dx = event.position().x() - self.last_mouse_pos.x()
         dy = event.position().y() - self.last_mouse_pos.y()
         self.last_mouse_pos = event.position()
@@ -476,13 +480,20 @@ class OpenGLViewport(QOpenGLWidget):
             self.rot_y = (self.rot_y + dx * 0.4) % 360.0
             self.update()
 
-        elif event.buttons() & Qt.MouseButton.RightButton:
+        elif event.buttons() & (Qt.MouseButton.MiddleButton | Qt.MouseButton.RightButton):
             # Pan camera (sensitivity scales with distance)
             sensitivity = 0.002 * self.distance
             self.pan_x += dx * sensitivity
             self.pan_y -= dy * sensitivity
             self.update()
 
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """Restore the normal cursor after middle-button viewport panning."""
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._is_panning = False
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         event.accept()
 
     def wheelEvent(self, event: QWheelEvent):

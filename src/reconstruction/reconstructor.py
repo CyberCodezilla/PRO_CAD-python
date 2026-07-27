@@ -49,10 +49,10 @@ class ReconstructionWorker(QThread):
     def run(self):
         """Execute reconstruction pipeline"""
         try:
-            print("🚀 CSG Reconstruction background thread started...")
+            print("CSG Reconstruction background thread started...")
             
             # 1. Compute 3D coordinate bounding limits for extrusions
-            top_limits = self._get_view_bounds_3d(self.top_shapes, 'top')
+            top_limits = self._get_view_bounds_3d(self.top_shapes, 'top', self.projection_type)
             front_limits = self._get_view_bounds_3d(self.front_shapes, 'front')
             side_limits = self._get_view_bounds_3d(self.side_shapes, 'side')
             
@@ -88,10 +88,15 @@ class ReconstructionWorker(QThread):
                     if mesh_top is not None:
                         # 4x4 matrix: local (u, v, w, 1) -> 3D (X, Y, Z, 1)
                         # X = u, Y = w + y_min, Z = -v (since we mirrored, -v restores correct Z)
+                        # In third-angle layout the Top View is above the datum
+                        # and the LHS view is to the right, so both represent
+                        # positive physical depth. The previous fixed -Z mapping
+                        # placed these profiles on opposite sides of the solid.
+                        top_depth_sign = 1.0 if self.projection_type == '3rd_angle' else -1.0
                         M_top = np.array([
                             [1.0,  0.0, 0.0, 0.0],
                             [0.0,  0.0, 1.0, y_min],
-                            [0.0, -1.0, 0.0, 0.0],
+                            [0.0, top_depth_sign, 0.0, 0.0],
                             [0.0,  0.0, 0.0, 1.0]
                         ])
                         v_local = mesh_top.vertices
@@ -156,18 +161,18 @@ class ReconstructionWorker(QThread):
             if len(meshes_only) == 1:
                 final_mesh = meshes_only[0]
             else:
-                print(f"🧩 Intersecting {len(meshes_only)} extruded views...")
-                final_mesh = trimesh.boolean.intersection(meshes_only)
+                print(f"Intersecting {len(meshes_only)} extruded views...")
+                final_mesh = self._boolean_intersection(meshes_only)
                 
             # 5. Watertight repair and validation
             if final_mesh is not None and hasattr(final_mesh, 'faces') and len(final_mesh.faces) > 0 and getattr(final_mesh.faces, 'ndim', 0) == 2:
-                print("🔧 Repairing reconstructed solid mesh...")
+                print("Repairing reconstructed solid mesh...")
                 try:
                     trimesh.repair.fill_holes(final_mesh)
                     trimesh.repair.fix_normals(final_mesh)
                     final_mesh.fill_holes()
                     final_mesh.fix_normals()
-                    print(f"✓ Watertight check: {getattr(final_mesh, 'is_watertight', False)}")
+                    print(f"Watertight check: {getattr(final_mesh, 'is_watertight', False)}")
                 except Exception as e:
                     print(f"Warning during final mesh repair: {e}")
                 
@@ -175,9 +180,51 @@ class ReconstructionWorker(QThread):
             
         except Exception as e:
             tb = traceback.format_exc()
-            print(f"❌ Error during reconstruction: {e}\n{tb}")
+            print(f"Error during reconstruction: {e}\n{tb}")
             self.error_occurred.emit(tb)
  
+    def _boolean_intersection(self, meshes: List[trimesh.Trimesh]) -> Optional[trimesh.Trimesh]:
+        """Run a validated intersection with an engine fallback for backend variance."""
+        if not meshes:
+            return None
+        for engine in ("manifold", None):
+            try:
+                result = (trimesh.boolean.intersection(meshes, engine=engine)
+                          if engine else trimesh.boolean.intersection(meshes))
+                if result is not None and hasattr(result, "faces") and len(result.faces) > 0:
+                    return self._prepare_mesh(result)
+            except Exception as exc:
+                print(f"Boolean intersection failed with {engine or 'default'} backend: {exc}")
+        try:
+            result = meshes[0]
+            for mesh in meshes[1:]:
+                result = trimesh.boolean.intersection([result, mesh], engine="manifold")
+                if result is None or len(result.faces) == 0:
+                    return None
+            return self._prepare_mesh(result)
+        except Exception as exc:
+            print(f"Pairwise boolean intersection failed: {exc}")
+            return None
+
+    @staticmethod
+    def _normalize_polygonal(geometry):
+        """Repair Shapely polygonal input and discard non-area geometry."""
+        if geometry is None or geometry.is_empty:
+            return None
+        try:
+            if not geometry.is_valid:
+                geometry = geometry.buffer(0)
+            if geometry.is_empty:
+                return None
+            if geometry.geom_type == "GeometryCollection":
+                polygons = [g for g in geometry.geoms if g.geom_type in ("Polygon", "MultiPolygon") and not g.is_empty]
+                geometry = so.unary_union(polygons) if polygons else None
+            if geometry is None or geometry.is_empty or geometry.geom_type not in ("Polygon", "MultiPolygon"):
+                return None
+            return geometry if geometry.area > 1e-6 else None
+        except Exception as exc:
+            print(f"2D profile normalization failed: {exc}")
+            return None
     def _prepare_mesh(self, mesh: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
         """Ensure mesh is watertight and has outward-pointing face normals (positive volume)"""
         if mesh is None or not hasattr(mesh, 'faces') or len(mesh.faces) == 0 or getattr(mesh.faces, 'ndim', 0) != 2:
@@ -225,40 +272,42 @@ class ReconstructionWorker(QThread):
                 
         return None
 
-    def _get_view_bounds_3d(self, shapes: List[Dict[str, Any]], view_name: str) -> Tuple[float, float, float, float]:
-        """Compute projection-space coordinates of a view's bounding limits"""
+    def _get_view_bounds_3d(self, shapes: List[Dict[str, Any]], view_name: str, projection_type: str = '3rd_angle') -> Tuple[float, float, float, float]:
+        """Compute bounds in the same coordinate system used by each extrusion."""
         if not shapes:
             return (-50.0, 50.0, -50.0, 50.0)
-            
+
         horiz_vals = []
         vert_vals = []
-        
+        top_uses_positive_depth = view_name == 'top' and projection_type == '3rd_angle'
+
         for s in shapes:
             t = s.get('type')
             if t == 'rectangle':
                 x, y, w, h = s['rect']
                 horiz_vals.extend([x, x + w])
-                vert_vals.extend([-(y + h), -y])
+                vert_vals.extend([y, y + h] if top_uses_positive_depth else [-(y + h), -y])
             elif t == 'circle':
                 cx, cy = s['center']
                 r = s['radius']
                 horiz_vals.extend([cx - r, cx + r])
-                vert_vals.extend([-cy - r, -cy + r])
+                vert_vals.extend([cy - r, cy + r] if top_uses_positive_depth else [-cy - r, -cy + r])
             elif t == 'polygon':
                 for p in s['points']:
                     horiz_vals.append(p[0])
-                    vert_vals.append(-p[1])
+                    vert_vals.append(p[1] if top_uses_positive_depth else -p[1])
             elif t == 'line':
-                start = s['start']
-                end = s['end']
+                start, end = s['start'], s['end']
                 horiz_vals.extend([start[0], end[0]])
-                vert_vals.extend([-start[1], -end[1]])
-                
+                vert_vals.extend(([start[1], end[1]]) if top_uses_positive_depth else ([-start[1], -end[1]]))
+            elif t == 'arc':
+                cx, cy, r = s['center'][0], s['center'][1], s['radius']
+                horiz_vals.extend([cx - r, cx + r])
+                vert_vals.extend([cy - r, cy + r] if top_uses_positive_depth else [-cy - r, -cy + r])
+
         if not horiz_vals or not vert_vals:
             return (-50.0, 50.0, -50.0, 50.0)
-            
         return (min(horiz_vals), max(horiz_vals), min(vert_vals), max(vert_vals))
-
     def _extract_view_profile(self, shapes: List[Dict[str, Any]]) -> Optional[sg.Polygon]:
         """Assemble outer silhouettes and nested subtractive loops into a single Shapely Polygon"""
         if not shapes:
@@ -335,72 +384,51 @@ class ReconstructionWorker(QThread):
                 
         # 2. Support line polygonization for vector wireframe loops
         if visible_lines:
-            polygonized_vis = list(so.polygonize(visible_lines))
-            if polygonized_vis:
-                # Add discovered closed loops to visible shapes
-                visible_polys.extend(polygonized_vis)
-            else:
-                # Fallback: if we have no closed geometry shapes but only isolated lines,
-                # construct a bounding box around them
-                if not visible_polys:
-                    all_pts = []
-                    for line in visible_lines:
-                        all_pts.extend(line.coords)
-                    if all_pts:
-                        xs = [p[0] for p in all_pts]
-                        ys = [p[1] for p in all_pts]
-                        visible_polys.append(sg.box(min(xs), min(ys), max(xs), max(ys)))
-                        
+            visible_polys.extend(so.polygonize(so.unary_union(visible_lines)))
         if hidden_lines:
-            polygonized_hid = list(so.polygonize(hidden_lines))
-            if polygonized_hid:
-                hidden_polys.extend(polygonized_hid)
-                        
+            hidden_polys.extend(so.polygonize(so.unary_union(hidden_lines)))
+
+        visible_polys = [p for p in (self._normalize_polygonal(g) for g in visible_polys) if p is not None]
+        hidden_polys = [p for p in (self._normalize_polygonal(g) for g in hidden_polys) if p is not None]
         if not visible_polys:
             return None
-            
+
         # 3. Containment analysis for nested profiles (through-holes / inner loops)
-        # Sort visible polygons by area descending to process larger outer boundaries first
         visible_polys.sort(key=lambda p: p.area, reverse=True)
-        
         final_visible_list = []
         processed_indices = set()
-        
         for i, outer_poly in enumerate(visible_polys):
             if i in processed_indices:
                 continue
-                
             temp_outer = outer_poly
-            # Find and subtract any smaller visible shapes contained within this outer shape (creates holes)
             for j in range(i + 1, len(visible_polys)):
                 if j in processed_indices:
                     continue
                 inner_candidate = visible_polys[j]
-                
-                # Check if outer shape completely contains the candidate inner shape
                 if temp_outer.contains(inner_candidate):
-                    temp_outer = temp_outer.difference(inner_candidate)
+                    temp_outer = self._normalize_polygonal(temp_outer.difference(inner_candidate))
                     processed_indices.add(j)
-                    
-            final_visible_list.append(temp_outer)
+            if temp_outer is not None and not temp_outer.is_empty:
+                final_visible_list.append(temp_outer)
             processed_indices.add(i)
-            
+
         # 4. Subtract explicitly hidden layer elements (pocket/hole profiles)
         final_profiles = []
         for vis_poly in final_visible_list:
             temp_poly = vis_poly
             for hid_poly in hidden_polys:
                 if temp_poly.intersects(hid_poly):
-                    temp_poly = temp_poly.difference(hid_poly)
-            if not temp_poly.is_empty:
+                    temp_poly = self._normalize_polygonal(temp_poly.difference(hid_poly))
+                    if temp_poly is None:
+                        break
+            if temp_poly is not None and not temp_poly.is_empty:
                 final_profiles.append(temp_poly)
-                
         if not final_profiles:
             return None
-            
-        # 5. Union all separate visible islands
-        return so.unary_union(final_profiles)
 
+        # 5. Union all separate visible islands, then normalize once more so
+        # extrusion never receives self-intersecting rings or zero-area fragments.
+        return self._normalize_polygonal(so.unary_union(final_profiles))
 
 class Reconstructor3D:
     """CSG reconstruction pipeline coordinator"""
@@ -467,4 +495,4 @@ class Reconstructor3D:
         if mesh is None:
             raise ValueError("No mesh available for export")
         mesh.export(filename)
-        print(f"💾 Successfully exported 3D model to {filename}")
+        print(f"Successfully exported 3D model to {filename}")

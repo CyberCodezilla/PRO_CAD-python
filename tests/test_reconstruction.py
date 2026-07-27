@@ -252,3 +252,34 @@ def test_rules_engine_evaluations():
     rule_ids_after = [d.rule_id for d in diags_after]
     assert "RULE_ALIGN_WIDTH" not in rule_ids_after
 
+
+
+def test_third_angle_lhs_depth_mapping():
+    """Top depth above the datum must intersect positive-depth LHS geometry."""
+    top_shapes = [{'type': 'rectangle', 'rect': (0.0, 0.0, 100.0, 100.0), 'layer': 'Visible'}]
+    front_shapes = [{'type': 'rectangle', 'rect': (0.0, -100.0, 100.0, 100.0), 'layer': 'Visible'}]
+    side_shapes = [{'type': 'rectangle', 'rect': (0.0, -100.0, 100.0, 100.0), 'layer': 'Visible'}]
+
+    worker = ReconstructionWorker(top_shapes, front_shapes, side_shapes, projection_type='3rd_angle')
+    result = []
+    worker.finished_reconstruction.connect(result.append)
+    worker.run()
+
+    assert result and result[0] is not None
+    assert result[0].is_watertight
+    assert result[0].volume > 0.0
+
+def test_offset_third_angle_profiles_share_the_same_depth_range():
+    """Non-origin profiles must still overlap after sheet-to-model conversion."""
+    top_shapes = [{'type': 'rectangle', 'rect': (-400.0, 150.0, 100.0, 100.0), 'layer': 'Visible'}]
+    front_shapes = [{'type': 'rectangle', 'rect': (-400.0, -200.0, 100.0, 100.0), 'layer': 'Visible'}]
+    side_shapes = [{'type': 'rectangle', 'rect': (100.0, -200.0, 100.0, 100.0), 'layer': 'Visible'}]
+
+    worker = ReconstructionWorker(top_shapes, front_shapes, side_shapes, projection_type='3rd_angle')
+    result = []
+    worker.finished_reconstruction.connect(result.append)
+    worker.run()
+
+    assert result and result[0] is not None
+    assert result[0].is_watertight
+    assert result[0].volume > 0.0
