@@ -31,3 +31,4 @@
 - [2026-07-27T15:04:58 +0530] feat(canvas): implement snap-to-grid functionality for line and arc creation
 - [2026-07-27T15:25:21 +0530] docs(readme): update system prerequisites, build instructions, and PySide6 setup
 - [2026-07-27T19:31:48 +0530] feat(export): add DXF R12 ascii exporter for 2D technical drawings
+- [2026-07-27T20:04:49 +0530] perf(reconstruction): parallelize triangulation for complex planar polygons
