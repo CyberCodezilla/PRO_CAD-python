@@ -8,3 +8,4 @@
 - [2026-07-27T15:50:28 +0530] feat(canvas): implement snap-to-grid functionality for line and arc creation
 - [2026-07-27T16:44:43 +0530] perf(viewport): optimize PyOpenGL VBO data uploads during dynamic orbit
 - [2026-07-27T17:30:53 +0530] feat(reconstruction): implement 2D slice plane extraction from 3D boundary representation
+- [2026-07-27T19:06:55 +0530] fix(viewport): prevent memory leak when re-initializing PyOpenGL VAOs
