@@ -27,3 +27,4 @@
 - [2026-07-27T10:53:06 +0530] test(reconstruction): add comprehensive unit tests for orthographic projection
 - [2026-07-27T10:59:56 +0530] refactor(reconstruction): extract mesh triangulation into dedicated helper package
 - [2026-07-27T12:16:24 +0530] fix(canvas): resolve zoom origin offset on high-DPI display scale factors
+- [2026-07-27T12:32:11 +0530] fix(engine): resolve numerical instability in line-arc intersection solver
