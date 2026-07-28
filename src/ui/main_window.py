@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QTabWidget, QLineEdit, QLabel, QStatusBar,
     QMessageBox, QFileDialog, QDockWidget, QTreeWidget, 
     QTreeWidgetItem, QPushButton, QCheckBox, QComboBox, 
-    QSlider, QDoubleSpinBox, QFormLayout, QDialog, QDialogButtonBox
+    QSlider, QDoubleSpinBox, QFormLayout, QDialog, QDialogButtonBox, QFrame
 )
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QAction, QKeySequence, QCursor, QColor, QBrush
@@ -52,6 +52,38 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
+        # Professional document header. This is presentation-only; all existing controls
+        # and signals remain unchanged below it.
+        header = QFrame()
+        header.setObjectName("DocumentHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 10, 18, 10)
+        header_layout.setSpacing(14)
+
+        brand = QLabel("PYTHON CAD PRO")
+        brand.setObjectName("BrandLabel")
+        header_layout.addWidget(brand)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setObjectName("HeaderSeparator")
+        header_layout.addWidget(separator)
+
+        document_label = QLabel("UNTITLED PROJECT")
+        document_label.setObjectName("DocumentLabel")
+        header_layout.addWidget(document_label)
+        header_layout.addStretch()
+
+        mode_label = QLabel("2D DRAFT  /  3D PREVIEW")
+        mode_label.setObjectName("ModeLabel")
+        header_layout.addWidget(mode_label)
+        self.rebuild_button = QPushButton("Generate 3D Model")
+        self.rebuild_button.setObjectName("PrimaryAction")
+        self.rebuild_button.setToolTip("Rebuild the 3D preview from the current drawing")
+        self.rebuild_button.clicked.connect(self._trigger_reconstruction)
+        header_layout.addWidget(self.rebuild_button)
+        main_layout.addWidget(header)
+
         # Horizontal Split Panel: Left (Tools + 2D), Right (3D Viewport)
         content_splitter = QSplitter(Qt.Orientation.Horizontal)
         
@@ -94,8 +126,8 @@ class MainWindow(QMainWindow):
         console_layout.setContentsMargins(10, 5, 10, 5)
         console_layout.setSpacing(5)
         
-        console_label = QLabel("Command:")
-        console_label.setStyleSheet("color: #00FFFF; font-weight: bold; font-family: Consolas;")
+        console_label = QLabel("COMMAND")
+        console_label.setStyleSheet("color: #75b9e6; font-weight: 600; font-family: Consolas;")
         console_layout.addWidget(console_label)
         
         self.command_input = QLineEdit()
@@ -242,56 +274,32 @@ class MainWindow(QMainWindow):
         help_menu.addAction(guide_action)
         
     def _apply_theme(self):
-        """Apply modern dark CAD interface styling"""
+        """Apply the neutral, high-contrast visual system used by the workspace."""
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1E1E1E;
-            }
-            QMenuBar {
-                background-color: #2D2D2D;
-                color: #D4D4D4;
-                border-bottom: 1px solid #3C3C3C;
-            }
-            QMenuBar::item:selected {
-                background-color: #3C3C3C;
-                color: #FFFFFF;
-            }
-            QStatusBar {
-                background-color: #007ACC;
-                color: #FFFFFF;
-                font-family: Consolas;
-                font-size: 11px;
-            }
-            QTabWidget::pane {
-                border: 1px solid #3C3C3C;
-                background-color: #1E1E1E;
-            }
-            QTabBar::tab {
-                background-color: #2D2D2D;
-                color: #8C8C8C;
-                padding: 6px 12px;
-                border: 1px solid #3C3C3C;
-                border-bottom: none;
-                border-top-left-radius: 3px;
-                border-top-right-radius: 3px;
-                font-size: 11px;
-            }
-            QTabBar::tab:selected {
-                background-color: #1E1E1E;
-                color: #00FFFF;
-                font-weight: bold;
-                border-bottom: 1px solid #1E1E1E;
-            }
-            QSplitter::handle {
-                background-color: #2D2D2D;
-                width: 3px;
-            }
-            #ConsoleWidget {
-                background-color: #252526;
-                border-top: 1px solid #3C3C3C;
-            }
+            QMainWindow, QWidget { background-color: #1a1f24; color: #d7dde3; font-family: "Segoe UI"; font-size: 11px; }
+            QMenuBar { background-color: #15191d; color: #b8c0c8; border-bottom: 1px solid #303840; padding: 2px 8px; }
+            QMenuBar::item { padding: 6px 10px; }
+            QMenuBar::item:selected, QMenu::item:selected { background-color: #263b4d; color: #ffffff; }
+            QMenu { background-color: #20262c; color: #d7dde3; border: 1px solid #3a4149; }
+            QStatusBar { background-color: #12344a; color: #d9eefb; border-top: 1px solid #245a7a; font-family: "Consolas"; font-size: 10px; padding-left: 8px; }
+            #DocumentHeader { background-color: #20262c; border-bottom: 1px solid #3a4149; }
+            #BrandLabel { color: #f0f4f7; font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+            #DocumentLabel { color: #8995a0; font-size: 10px; font-weight: 600; letter-spacing: 0.8px; }
+            #ModeLabel { color: #75b9e6; font-size: 10px; font-weight: 600; letter-spacing: 0.7px; }
+            #HeaderSeparator { color: #46515b; }
+            #PrimaryAction { background-color: #1f75b5; color: #ffffff; border: 1px solid #3c9bdd; border-radius: 3px; padding: 7px 14px; font-weight: 600; }
+            #PrimaryAction:hover { background-color: #2887c8; }
+            QDockWidget { color: #d7dde3; font-weight: 600; }
+            QDockWidget::title { background-color: #20262c; padding: 8px 10px; border-bottom: 1px solid #3a4149; }
+            QSplitter::handle { background-color: #39434c; width: 4px; }
+            QLineEdit, QComboBox, QDoubleSpinBox, QTreeWidget { background-color: #171c21; color: #d7dde3; border: 1px solid #3a4149; border-radius: 3px; selection-background-color: #245a7a; }
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border-color: #3c9bdd; }
+            QCheckBox { spacing: 7px; }
+            QTabWidget::pane { border: 1px solid #303840; background-color: #1a1f24; }
+            QTabBar::tab { background-color: #20262c; color: #8995a0; padding: 7px 14px; border: 1px solid #303840; }
+            QTabBar::tab:selected { background-color: #1a1f24; color: #75b9e6; border-top: 2px solid #3c9bdd; }
+            #ConsoleWidget { background-color: #15191d; border-top: 1px solid #3a4149; }
         """)
-
     def _on_tool_selected(self, tool_name: str):
         """Sync active tool with 2D unified canvas"""
         self.cad_engine.set_active_tool(tool_name)
@@ -458,10 +466,10 @@ class MainWindow(QMainWindow):
         # 1. Evaluate CAD Doctor RulesEngine
         is_valid, proj_type = self._run_diagnostics_and_update_doctor()
         if not is_valid:
-            self.statusBar().showMessage("❌ Reconstruction Blocked: CAD Doctor identified geometry errors. See panel below.")
+            self.statusBar().showMessage("Reconstruction blocked: CAD Doctor identified geometry errors. See panel below.")
             return
 
-        self.statusBar().showMessage(f"⚙️ Generating watertight 3D model ({proj_type.upper()})...")
+        self.statusBar().showMessage(f"Generating watertight 3D model ({proj_type.upper()})...")
             
         # 2. Extract local shape profiles (Guardrails 1, 3, 4)
         tol = self.tolerance_spin.value() if hasattr(self, 'tolerance_spin') else 10.0
@@ -483,17 +491,17 @@ class MainWindow(QMainWindow):
         """Receive the reconstructed mesh safely on the GUI Thread and update OpenGLViewport"""
         if mesh is not None and len(mesh.vertices) > 0:
             self.viewport_3d.set_mesh(mesh)
-            self.statusBar().showMessage("✓ 3D Model updated successfully!")
+            self.statusBar().showMessage("3D model updated successfully.")
         else:
             self.viewport_3d.set_mesh(None)
-            self.statusBar().showMessage("⚠ Reconstruction returned an empty mesh. Draw profiles in views first.")
+            self.statusBar().showMessage("Reconstruction returned an empty mesh. Draw profiles in views first.")
             
         # Update right-side properties panel tree view
         self._update_properties_panel()
 
     def _on_reconstruction_error(self, error_trace: str):
         """Handle error from background thread"""
-        self.statusBar().showMessage("❌ Reconstruction Error! Click Help or check console log.")
+        self.statusBar().showMessage("Reconstruction error. Click Help or check the console log.")
         QMessageBox.critical(
             self,
             "Reconstruction Error",
@@ -523,18 +531,18 @@ class MainWindow(QMainWindow):
     def _show_help_dialog(self):
         """Display an interactive, beautifully formatted CAD User Guide"""
         help_text = (
-            "<h3>📘 Python CAD Pro - Engineering Graphics User Guide</h3>"
+            "<h3>Python CAD Pro - Engineering Graphics User Guide</h3>"
             "<p>Welcome to <b>Python CAD Pro</b>, a professional desktop CAD editor. "
             "Draft on the 2D orthographic canvases and reconstruct watertight 3D models instantly.</p>"
             
-            "<h4>📌 1. Line Types (Engineering Graphics Convention)</h4>"
+            "<h4>1. Line Types (Engineering Graphics Convention)</h4>"
             "<ul>"
             "<li><b>Visible Layer (Solid Cyan):</b> Used to draft the outer solid boundaries of your part.</li>"
             "<li><b>Hidden Layer (Dashed Cyan):</b> Used to draft internal holes, pockets, or cuts. Hidden profiles are subtracted from visible profiles during 3D CSG reconstruction.</li>"
             "<li><b>Construction Layer (Faint Grey):</b> Alignment/layout lines. Ignored in 3D reconstruction.</li>"
             "</ul>"
             
-            "<h4>📌 2. Drafting Tools & Snapping</h4>"
+            "<h4>2. Drafting Tools & Snapping</h4>"
             "<ul>"
             "<li><b>Select Tool:</b> Select shapes on the active tab canvas. Press <b>Delete</b> key to remove selected shapes.</li>"
             "<li><b>Line, Rectangle, Circle, Polygon:</b> Select a shape drawing tool from the vertical toolbar. Click on the canvas to place points.</li>"
@@ -543,7 +551,7 @@ class MainWindow(QMainWindow):
             "<li><b>Grid Snapping:</b> Snaps coordinate placements to the nearest 10px grid intersection.</li>"
             "</ul>"
             
-            "<h4>📌 3. Command Console Instructions</h4>"
+            "<h4>3. Command Console Instructions</h4>"
             "Type parametric commands in the bottom bar and press <b>Enter</b>:"
             "<ul>"
             "<li><b>Relative Offset:</b> Type <code>dx,dy</code> (e.g. <code>100,50</code>) to place the next point relative to the last point.</li>"
@@ -552,7 +560,7 @@ class MainWindow(QMainWindow):
             "<li><b>Command shortcuts:</b> Type <code>undo</code>, <code>redo</code>, <code>clear</code>, or <code>help</code> in the console.</li>"
             "</ul>"
             
-            "<h4>📌 4. 3D Viewport Navigation</h4>"
+            "<h4>4. 3D Viewport Navigation</h4>"
             "<ul>"
             "<li><b>Rotate Camera:</b> Left-Click and drag inside the 3D viewport.</li>"
             "<li><b>Pan Viewport:</b> Right-Click and drag inside the 3D viewport.</li>"
@@ -763,7 +771,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.controls_dock)
 
         # 3. CAD Doctor Diagnostic Dock (Bottom Dockable Widget)
-        self.doctor_dock = QDockWidget("CAD Doctor — Diagnostics & Suggestions", self)
+        self.doctor_dock = QDockWidget("CAD DOCTOR  /  Diagnostics & Suggestions", self)
         self.doctor_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea)
         
         doctor_container = QWidget()
@@ -796,7 +804,7 @@ class MainWindow(QMainWindow):
         doctor_layout.addWidget(self.doctor_tree)
         
         btn_bar = QHBoxLayout()
-        self.autofix_btn = QPushButton("🔧 Apply Auto-Fix")
+        self.autofix_btn = QPushButton("Apply Auto-Fix")
         self.autofix_btn.setStyleSheet("""
             QPushButton {
                 background-color: #007ACC;
@@ -837,14 +845,14 @@ class MainWindow(QMainWindow):
                 proj_type = diag.fix_data.get('projection_type', '3rd_angle')
 
             if diag.severity == DiagnosticSeverity.ERROR:
-                sev_str = "❌ ERROR"
+                sev_str = "ERROR"
                 color = "#FF3333"
                 has_error = True
             elif diag.severity == DiagnosticSeverity.WARNING:
-                sev_str = "⚠️ WARNING"
+                sev_str = "WARNING"
                 color = "#FF8C00"
             else:
-                sev_str = "ℹ️ INFO"
+                sev_str = "INFO"
                 color = "#00FFFF"
 
             item = QTreeWidgetItem([sev_str, diag.title, diag.description, diag.suggestion])
@@ -883,7 +891,7 @@ class MainWindow(QMainWindow):
                 self.canvas.clear_highlights()
                 self.canvas.rebuild_scene()
                 self._run_diagnostics_and_update_doctor()
-                self.statusBar().showMessage(f"✓ Applied Auto-Fix: {diag.title}")
+                self.statusBar().showMessage(f"Applied Auto-Fix: {diag.title}")
             else:
                 self.statusBar().showMessage("Auto-Fix action not supported for this item.")
         else:
@@ -1038,7 +1046,7 @@ class MainWindow(QMainWindow):
                 }
                 with open(filename, 'w') as f:
                     json.dump(state, f, indent=2)
-                self.statusBar().showMessage(f"💾 Project saved to {filename}")
+                self.statusBar().showMessage(f"Project saved to {filename}")
             except Exception as e:
                 QMessageBox.critical(self, "Save Failed", f"Could not save project state:\n{str(e)}")
 
@@ -1058,7 +1066,7 @@ class MainWindow(QMainWindow):
                 self.cad_engine._save_state("Load Project")
                 self._sync_all_views()
                 self._trigger_reconstruction()
-                self.statusBar().showMessage(f"📂 Project loaded successfully from {filename}")
+                self.statusBar().showMessage(f"Project loaded successfully from {filename}")
             except Exception as e:
                 QMessageBox.critical(self, "Load Failed", f"Could not load project file:\n{str(e)}")
 
@@ -1190,9 +1198,9 @@ class MainWindow(QMainWindow):
             "<h3>Drafting Layers Configuration</h3>"
             "<p>Standard drafting properties applied in Python CAD Pro:</p>"
             "<hr/>"
-            "<p>🔴 <b>Visible Layer:</b> Solid Cyan, width 2.0px. Defines primary solid structures.</p>"
-            "<p>🟡 <b>Hidden Layer:</b> Dashed Cyan, width 2.0px. Defines subtractive interior features (holes/cuts).</p>"
-            "<p>⚪ <b>Construction Layer:</b> Solid Grey, width 1.0px. Auxiliary guides (ignored in 3D).</p>"
+            "<p><b>Visible Layer:</b> Solid Cyan, width 2.0px. Defines primary solid structures.</p>"
+            "<p><b>Hidden Layer:</b> Dashed Cyan, width 2.0px. Defines subtractive interior features (holes/cuts).</p>"
+            "<p><b>Construction Layer:</b> Solid Grey, width 1.0px. Auxiliary guides (ignored in 3D).</p>"
         )
 
     def _run_alignment_diagnostics(self) -> Tuple[bool, List[str]]:

@@ -33,7 +33,7 @@ class ViewSelector(QWidget):
         """)
         
         # Title
-        title = QLabel("📐 Orthographic Views")
+        title = QLabel("ORTHOGRAPHIC VIEWS")
         title.setStyleSheet("font-weight: bold; font-size: 16px; color: white; padding: 5px;")
         layout.addWidget(title)
         
@@ -61,7 +61,7 @@ class ViewSelector(QWidget):
         layout.addStretch()
         
         # Save view button
-        self.save_btn = QPushButton("💾 Save View")
+        self.save_btn = QPushButton("Save View")
         self.save_btn.setFixedSize(120, 40)
         self.save_btn.setStyleSheet("""
             QPushButton {
@@ -79,7 +79,7 @@ class ViewSelector(QWidget):
         layout.addWidget(self.save_btn)
         
         # Generate 3D button
-        self.generate_btn = QPushButton("🎯 Generate 3D Model")
+        self.generate_btn = QPushButton("Generate 3D Model")
         self.generate_btn.setFixedSize(160, 40)
         self.generate_btn.setStyleSheet("""
             QPushButton {
@@ -167,7 +167,7 @@ class ViewSelector(QWidget):
             # Update text with checkmark if saved
             view_name = view_id.capitalize()
             if is_saved:
-                btn.setText(f"{view_name} View ✓")
+                btn.setText(f"{view_name} View  |  SAVED")
             else:
                 btn.setText(f"{view_name} View")
                 

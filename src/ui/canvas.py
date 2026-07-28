@@ -247,7 +247,7 @@ class DrawingCanvas(QGraphicsView):
             display_name = "LHS View" if region.view_type == 'left_side' else ("RHS View" if region.view_type == 'right_side' else f"{region.view_type.capitalize()} View")
             active_tag = " [ACTIVE MODE]" if is_active else ""
             
-            text_item = self.scene().addText(f"📐 {display_name} ({plane_name}){active_tag}")
+            text_item = self.scene().addText(f"{display_name} ({plane_name}){active_tag}")
             text_item.setDefaultTextColor(color)
             font = text_item.font()
             font.setBold(True)
@@ -309,7 +309,7 @@ class DrawingCanvas(QGraphicsView):
             miter_line.setPen(miter_pen)
             self.scene().addItem(miter_line)
             
-            label = self.scene().addText("📐 45° Miter Line")
+            label = self.scene().addText("45° Miter Line")
             label.setDefaultTextColor(QColor('#FF8C00'))
             font = label.font()
             font.setBold(True)
@@ -792,6 +792,18 @@ class DrawingCanvas(QGraphicsView):
             r = np.sqrt(dx*dx + dy*dy)
             self.temp_item.setRect(start.x() - r, start.y() - r, 2 * r, 2 * r)
 
+    def _add_shape_from_unified_sheet(self, shape: Shape):
+        """Store a drawn shape in the visible sheet region under its centroid.
+
+        The unified sheet is spatially authoritative: drawing in the LHS quadrant
+        must create a Side shape even if the toolbar target was left on Front View.
+        Explicit target mode is retained only as a fallback outside a known region.
+        """
+        target_view = self.cad_engine.assign_shape_to_region(shape)
+        if target_view == 'unassigned' and self.cad_engine.active_view_mode != 'auto':
+            target_view = ('side' if self.cad_engine.active_view_mode in ('left_side', 'right_side')
+                           else self.cad_engine.active_view_mode)
+        self.cad_engine.add_shape(shape, target_view if target_view in ('top', 'front', 'side') else None)
     def _finalize_drawn_shape(self, end: QPointF):
         """Generate CADEngine model shape or ViewRegion and add it to project database"""
         from ..engine.cad_engine import ViewRegion
@@ -818,7 +830,7 @@ class DrawingCanvas(QGraphicsView):
 
         elif self.current_tool == 'line':
             shape = Line((start.x(), start.y()), (end.x(), end.y()), layer)
-            self.cad_engine.add_shape(shape)
+            self._add_shape_from_unified_sheet(shape)
             
         elif self.current_tool == 'rectangle':
             x = min(start.x(), end.x())
@@ -827,7 +839,7 @@ class DrawingCanvas(QGraphicsView):
             h = abs(end.y() - start.y())
             if w > 0.1 and h > 0.1:
                 shape = Rectangle((x, y, w, h), layer)
-                self.cad_engine.add_shape(shape)
+                self._add_shape_from_unified_sheet(shape)
                 
         elif self.current_tool == 'circle':
             dx = end.x() - start.x()
@@ -835,7 +847,7 @@ class DrawingCanvas(QGraphicsView):
             r = np.sqrt(dx*dx + dy*dy)
             if r > 0.1:
                 shape = Circle((start.x(), start.y()), r, layer)
-                self.cad_engine.add_shape(shape)
+                self._add_shape_from_unified_sheet(shape)
                 
         self.rebuild_scene()
 
@@ -844,7 +856,7 @@ class DrawingCanvas(QGraphicsView):
         if len(self.polygon_points) >= 3:
             pts = [(p.x(), p.y()) for p in self.polygon_points]
             shape = Polygon(pts, self.cad_engine.active_layer)
-            self.cad_engine.add_shape(shape, self.view_name)
+            self._add_shape_from_unified_sheet(shape)
             self.shape_drawn.emit()
             
         self.cancel_current_operation()
