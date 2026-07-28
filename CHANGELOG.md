@@ -37,3 +37,4 @@
 - [2026-07-28T13:34:02 +0530] feat(toolbar): add quick tooltips and dynamic status bar coordinate display
 - [2026-07-28T15:54:11 +0530] refactor(ui): streamline canvas mouse interaction and tool state machine
 - [2026-07-28T19:00:45 +0530] perf(viewport): optimize PyOpenGL VBO data uploads during dynamic orbit
+- [2026-07-28T20:59:40 +0530] test(canvas): add mouse drag and snap-to-grid interaction test cases
