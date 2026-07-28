@@ -12,3 +12,4 @@
 - [2026-07-27T20:41:57 +0530] feat(toolbar): add quick tooltips and dynamic status bar coordinate display
 - [2026-07-28T09:31:47 +0530] feat(viewport): render wireframe overlay with dynamic depth testing
 - [2026-07-28T12:55:24 +0530] refactor(core): decouple view selector events from main window event loop
+- [2026-07-28T15:41:20 +0530] fix(ui): correct layout margins in viewport dock widget initialization
