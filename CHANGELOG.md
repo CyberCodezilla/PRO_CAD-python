@@ -34,3 +34,4 @@
 - [2026-07-27T20:04:49 +0530] perf(reconstruction): parallelize triangulation for complex planar polygons
 - [2026-07-27T20:16:45 +0530] perf(math): vectorize bounding box intersection checks using numpy
 - [2026-07-27T21:29:35 +0530] feat(reconstruction): implement 2D slice plane extraction from 3D boundary representation
+- [2026-07-28T13:34:02 +0530] feat(toolbar): add quick tooltips and dynamic status bar coordinate display
