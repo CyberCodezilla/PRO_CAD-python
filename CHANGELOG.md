@@ -18,3 +18,4 @@
 - [2026-07-29T12:42:09 +0530] style(ui): apply dark theme palette to PySide6 docking widgets
 - [2026-07-29T13:36:33 +0530] perf(math): vectorize bounding box intersection checks using numpy
 - [2026-07-29T14:05:04 +0530] refactor(engine): optimize CSG boolean operations and vertex transformation matrix
+- [2026-07-29T14:11:54 +0530] feat(ui): add modern toolbar icons and view switching hotkeys
