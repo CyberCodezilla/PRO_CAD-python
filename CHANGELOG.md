@@ -39,3 +39,4 @@
 - [2026-07-28T19:00:45 +0530] perf(viewport): optimize PyOpenGL VBO data uploads during dynamic orbit
 - [2026-07-28T20:59:40 +0530] test(canvas): add mouse drag and snap-to-grid interaction test cases
 - [2026-07-28T21:10:09 +0530] refactor(core): decouple view selector events from main window event loop
+- [2026-07-29T10:05:45 +0530] refactor(engine): optimize CSG boolean operations and vertex transformation matrix
