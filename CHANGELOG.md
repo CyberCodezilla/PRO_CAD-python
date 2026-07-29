@@ -16,3 +16,4 @@
 - [2026-07-28T15:53:43 +0530] refactor(main): clean up app initialization and PySide6 stylesheet loading
 - [2026-07-28T15:57:19 +0530] fix(parser): validate entity layer definitions during DXF file import
 - [2026-07-29T12:42:09 +0530] style(ui): apply dark theme palette to PySide6 docking widgets
+- [2026-07-29T13:36:33 +0530] perf(math): vectorize bounding box intersection checks using numpy
