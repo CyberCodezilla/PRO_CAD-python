@@ -42,3 +42,4 @@
 - [2026-07-29T10:05:45 +0530] refactor(engine): optimize CSG boolean operations and vertex transformation matrix
 - [2026-07-29T11:38:47 +0530] docs(project): record milestone completion for Phase 2 reconstruction pipeline
 - [2026-07-29T16:24:06 +0530] fix(parser): validate entity layer definitions during DXF file import
+- [2026-07-29T18:39:33 +0530] perf(canvas): introduce spatial indexing for fast entity selection
