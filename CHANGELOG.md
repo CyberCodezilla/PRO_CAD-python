@@ -44,3 +44,4 @@
 - [2026-07-29T16:24:06 +0530] fix(parser): validate entity layer definitions during DXF file import
 - [2026-07-29T18:39:33 +0530] perf(canvas): introduce spatial indexing for fast entity selection
 - [2026-07-30T13:32:03 +0530] refactor(main): clean up app initialization and PySide6 stylesheet loading
+- [2026-07-30T15:06:42 +0530] fix(ui): correct layout margins in viewport dock widget initialization
