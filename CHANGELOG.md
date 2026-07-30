@@ -21,3 +21,4 @@
 - [2026-07-29T14:11:54 +0530] feat(ui): add modern toolbar icons and view switching hotkeys
 - [2026-07-30T12:21:53 +0530] fix(reconstruction): handle degenerate faces in 3D wireframe mesh generator
 - [2026-07-30T16:02:53 +0530] test(canvas): add mouse drag and snap-to-grid interaction test cases
+- [2026-07-30T17:05:05 +0530] feat(engine): add parametric constraint solver for 2D entity alignment
