@@ -20,3 +20,4 @@
 - [2026-07-29T14:05:04 +0530] refactor(engine): optimize CSG boolean operations and vertex transformation matrix
 - [2026-07-29T14:11:54 +0530] feat(ui): add modern toolbar icons and view switching hotkeys
 - [2026-07-30T12:21:53 +0530] fix(reconstruction): handle degenerate faces in 3D wireframe mesh generator
+- [2026-07-30T16:02:53 +0530] test(canvas): add mouse drag and snap-to-grid interaction test cases
