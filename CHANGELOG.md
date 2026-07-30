@@ -46,3 +46,4 @@
 - [2026-07-30T13:32:03 +0530] refactor(main): clean up app initialization and PySide6 stylesheet loading
 - [2026-07-30T15:06:42 +0530] fix(ui): correct layout margins in viewport dock widget initialization
 - [2026-07-30T16:29:41 +0530] docs(changelog): update release notes for v0.4.0-alpha CAD engine
+- [2026-07-30T20:20:07 +0530] feat(viewport): render wireframe overlay with dynamic depth testing
