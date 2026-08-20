@@ -26,3 +26,10 @@ crash_log.txt
 *.obj
 *.3mf
 *.dxf
+*.step
+*.stp
+*.iges
+test_out.step
+dist/
+build/
+extracted_plan/
