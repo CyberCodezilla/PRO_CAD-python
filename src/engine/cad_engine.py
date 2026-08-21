@@ -4,6 +4,7 @@ CAD Engine - Core data model and shape management with history stack & unified o
 import uuid
 import numpy as np
 from typing import List, Dict, Tuple, Any, Optional
+from .constraint_solver import Constraint, ConstraintType, ConstraintSolver2D
 
 class Shape:
     """Base class for all drawing shapes"""
@@ -25,7 +26,8 @@ class Shape:
         shape_id = d.get('id')
         
         if shape_type == 'line':
-            return Line(tuple(d['start']), tuple(d['end']), layer, shape_id)
+            return Line(tuple(d['start']), tuple(d['end']), layer, shape_id,
+                        d.get('feature_type', 'default'), float(d.get('chamfer_dist', 0.0)), float(d.get('chamfer_angle', 45.0)))
         elif shape_type == 'rectangle':
             return Rectangle(tuple(d['rect']), layer, shape_id)
         elif shape_type == 'circle':
@@ -34,7 +36,8 @@ class Shape:
             points = [tuple(p) for p in d['points']]
             return Polygon(points, layer, shape_id)
         elif shape_type == 'arc':
-            return Arc(tuple(d['center']), float(d['radius']), float(d['start_angle']), float(d['end_angle']), layer, shape_id)
+            return Arc(tuple(d['center']), float(d['radius']), float(d['start_angle']), float(d['end_angle']), layer, shape_id,
+                       d.get('feature_type', 'default'), float(d.get('fillet_radius', float(d['radius']))))
         elif shape_type == 'dimension':
             return Dimension(d['dim_type'], tuple(d['start_pt']), tuple(d['end_pt']), tuple(d['label_pt']), d['text'], d.get('target_shape_ids', []), layer, shape_id)
         
@@ -44,10 +47,14 @@ class Shape:
 class Line(Shape):
     """Line segment primitive"""
     
-    def __init__(self, start: Tuple[float, float], end: Tuple[float, float], layer: str = "Visible", shape_id: str = None):
+    def __init__(self, start: Tuple[float, float], end: Tuple[float, float], layer: str = "Visible", shape_id: str = None,
+                 feature_type: str = "default", chamfer_dist: float = 0.0, chamfer_angle: float = 45.0):
         super().__init__('line', layer, shape_id)
         self.start = start  # (x, y)
         self.end = end      # (x, y)
+        self.feature_type = feature_type      # 'default', 'chamfer'
+        self.chamfer_dist = chamfer_dist
+        self.chamfer_angle = chamfer_angle
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,7 +62,10 @@ class Line(Shape):
             'type': self.type,
             'layer': self.layer,
             'start': self.start,
-            'end': self.end
+            'end': self.end,
+            'feature_type': self.feature_type,
+            'chamfer_dist': self.chamfer_dist,
+            'chamfer_angle': self.chamfer_angle
         }
 
 
@@ -112,12 +122,15 @@ class Polygon(Shape):
 class Arc(Shape):
     """Circular arc primitive"""
     
-    def __init__(self, center: Tuple[float, float], radius: float, start_angle: float, end_angle: float, layer: str = "Visible", shape_id: str = None):
+    def __init__(self, center: Tuple[float, float], radius: float, start_angle: float, end_angle: float, layer: str = "Visible", shape_id: str = None,
+                 feature_type: str = "default", fillet_radius: float = 0.0):
         super().__init__('arc', layer, shape_id)
         self.center = center          # (x, y)
         self.radius = radius
         self.start_angle = start_angle # in degrees (0-360)
         self.end_angle = end_angle     # in degrees (0-360)
+        self.feature_type = feature_type      # 'default', 'fillet'
+        self.fillet_radius = fillet_radius if fillet_radius > 0.0 else radius
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -127,7 +140,9 @@ class Arc(Shape):
             'center': self.center,
             'radius': self.radius,
             'start_angle': self.start_angle,
-            'end_angle': self.end_angle
+            'end_angle': self.end_angle,
+            'feature_type': self.feature_type,
+            'fillet_radius': self.fillet_radius
         }
 
 
@@ -247,6 +262,8 @@ class CADEngine:
             'unassigned': []
         }
         self.view_regions: Dict[str, ViewRegion] = {}
+        self.constraints: List[Constraint] = []
+        self.constraint_solver = ConstraintSolver2D()
         self.active_tool: str = 'select'
         self.active_layer: str = 'Visible'  # 'Visible', 'Hidden', 'Construction'
         self.active_view_mode: str = 'auto'  # 'auto', 'top', 'front', 'left_side', 'right_side'
@@ -484,6 +501,55 @@ class CADEngine:
             return True, redone_desc
         return False, ""
             
+    def add_constraint(self, constraint: Constraint):
+        """Add a geometric constraint and solve immediately"""
+        self.constraints = [c for c in self.constraints if c.id != constraint.id]
+        self.constraints.append(constraint)
+        self.solve_constraints()
+        self._save_state(f"Add {constraint.constraint_type.value.capitalize()} Constraint")
+
+    def remove_constraint(self, constraint_id: str) -> bool:
+        """Remove a constraint by ID"""
+        initial_len = len(self.constraints)
+        self.constraints = [c for c in self.constraints if c.id != constraint_id]
+        if len(self.constraints) < initial_len:
+            self._save_state("Remove Constraint")
+            return True
+        return False
+
+    def get_constraints_for_shape(self, shape_id: str) -> List[Constraint]:
+        """Retrieve all constraints affecting a specific shape"""
+        return [c for c in self.constraints if shape_id in c.shape_ids]
+
+    def detect_and_tag_corner_blends(self, view: str):
+        """Automatically identify 2D corner blend arcs and chamfer bevels and tag them semantically"""
+        if view not in self.shapes:
+            return
+        for s in self.shapes[view]:
+            if isinstance(s, Arc):
+                sweep = abs(s.end_angle - s.start_angle)
+                if 70.0 <= sweep <= 110.0 or 250.0 <= sweep <= 290.0:
+                    s.feature_type = 'fillet'
+                    s.fillet_radius = s.radius
+            elif isinstance(s, Line):
+                dx = abs(s.end[0] - s.start[0])
+                dy = abs(s.end[1] - s.start[1])
+                length = (dx*dx + dy*dy)**0.5
+                if dx > 1.0 and dy > 1.0 and abs(dx - dy) / max(dx, dy) < 0.15 and length < 60.0:
+                    s.feature_type = 'chamfer'
+                    s.chamfer_dist = length / 1.4142
+                    s.chamfer_angle = 45.0
+
+    def solve_constraints(self) -> Tuple[bool, str]:
+        """Execute 2D parametric constraint solver across all shapes"""
+        if not self.constraints:
+            return True, "No constraints to solve."
+        all_shapes = []
+        for v in self.shapes.values():
+            all_shapes.extend(v)
+        success, updated, msg = self.constraint_solver.solve(all_shapes, self.constraints)
+        return success, msg
+
     def _save_state(self, description: str = "State Change"):
         """Save current state for undo/redo"""
         for view in self.shapes.keys():
@@ -491,9 +557,22 @@ class CADEngine:
             
         self.history = self.history[:self.history_index + 1]
         
+        serialized_constraints = []
+        for c in self.constraints:
+            serialized_constraints.append({
+                'id': c.id,
+                'constraint_type': c.constraint_type.value,
+                'shape_ids': c.shape_ids,
+                'value': c.value,
+                'point_indices': c.point_indices,
+                'view_name': c.view_name,
+                'is_active': c.is_active
+            })
+            
         state = {
             'shapes': {v: [s.to_dict() for s in self.shapes[v]] for v in self.shapes},
-            'regions': {k: r.to_dict() for k, r in self.view_regions.items()}
+            'regions': {k: r.to_dict() for k, r in self.view_regions.items()},
+            'constraints': serialized_constraints
         }
         
         self.history.append((description, state))
@@ -504,11 +583,26 @@ class CADEngine:
             self.history_index -= 1
             
     def _load_state_from_history(self):
-        """Restore shapes and regions from history state"""
+        """Restore shapes, regions, and constraints from history state"""
         description, state = self.history[self.history_index]
         if 'shapes' in state:
             self.shapes = {v: [Shape.from_dict(s) for s in state['shapes'][v]] for v in state['shapes']}
             self.view_regions = {k: ViewRegion.from_dict(r) for k, r in state.get('regions', {}).items()}
+            self.constraints = []
+            for cd in state.get('constraints', []):
+                try:
+                    ctype = ConstraintType(cd['constraint_type'])
+                    self.constraints.append(Constraint(
+                        id=cd['id'],
+                        constraint_type=ctype,
+                        shape_ids=cd['shape_ids'],
+                        value=cd.get('value'),
+                        point_indices=cd.get('point_indices'),
+                        view_name=cd.get('view_name', 'unified'),
+                        is_active=cd.get('is_active', True)
+                    ))
+                except Exception:
+                    pass
         else:
             # Legacy fallback
             self.shapes = {
@@ -517,6 +611,7 @@ class CADEngine:
                 'side': [Shape.from_dict(s) for s in state.get('side', [])],
                 'unassigned': []
             }
+            self.constraints = []
             
     def update_associative_dimensions(self, view: str):
         """Update dimension text linked to target shapes"""
