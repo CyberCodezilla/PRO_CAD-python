@@ -264,8 +264,56 @@ class DrawingCanvas(QGraphicsView):
             is_unassigned = (vk == 'unassigned')
             for shape in self.cad_engine.shapes[vk]:
                 self._add_shape_to_scene(shape, is_unassigned=is_unassigned)
+
+        # 4. Render Geometric Constraint Badges
+        self._draw_constraint_badges()
             
         self.scene().update()
+
+    def _draw_constraint_badges(self):
+        """Render small visual glyph badges for active parametric constraints"""
+        if not hasattr(self.cad_engine, 'constraints') or not self.cad_engine.constraints:
+            return
+            
+        all_shapes = {}
+        for shapes_list in self.cad_engine.shapes.values():
+            for s in shapes_list:
+                all_shapes[s.id] = s
+                
+        for c in self.cad_engine.constraints:
+            if not c.is_active or not c.shape_ids:
+                continue
+                
+            s1 = all_shapes.get(c.shape_ids[0])
+            if not s1:
+                continue
+                
+            # Compute position for badge
+            badge_pos = None
+            if s1.type == 'line':
+                badge_pos = QPointF((s1.start[0] + s1.end[0]) / 2.0, (s1.start[1] + s1.end[1]) / 2.0)
+            elif s1.type in ('circle', 'arc'):
+                badge_pos = QPointF(s1.center[0], s1.center[1] - s1.radius - 8.0)
+            elif s1.type == 'rectangle':
+                badge_pos = QPointF(s1.rect[0] + s1.rect[2] / 2.0, s1.rect[1] - 8.0)
+                
+            if badge_pos:
+                ctype_name = c.constraint_type.value
+                glyph = "C"
+                if ctype_name == "horizontal": glyph = "H"
+                elif ctype_name == "vertical": glyph = "V"
+                elif ctype_name == "tangent": glyph = "T"
+                elif ctype_name == "distance": glyph = f"D:{c.value:.0f}" if c.value else "D"
+                elif ctype_name == "radius": glyph = f"R:{c.value:.0f}" if c.value else "R"
+                
+                badge = self.scene().addText(f"[{glyph}]")
+                badge.setDefaultTextColor(QColor('#00E5FF'))
+                b_font = badge.font()
+                b_font.setPointSize(8)
+                b_font.setBold(True)
+                badge.setFont(b_font)
+                badge.setPos(badge_pos.x() - 8, badge_pos.y() - 14)
+
 
     def _draw_unified_projection_lines(self):
         """Draw orthographic projection alignment guidelines & 45° Miter Line"""
@@ -1449,11 +1497,42 @@ class DrawingCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
         
     def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """Double click closes polygon shape drafting"""
-        if event.button() == Qt.MouseButton.LeftButton and self.current_tool == 'polygon':
-            self._finalize_polygon()
-            event.accept()
-            return
+        """Double click closes polygon drafting or enables direct bidirectional dimension editing"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.current_tool == 'polygon':
+                self._finalize_polygon()
+                event.accept()
+                return
+
+            # Direct Dimension / Geometry Parametric Editing (Module 4)
+            scene_pos = self.mapToScene(event.position().toPoint())
+            closest_line = self._find_closest_line(scene_pos, max_dist_px=35.0)
+            if closest_line is not None:
+                p1 = np.array(closest_line.start)
+                p2 = np.array(closest_line.end)
+                cur_len = float(np.linalg.norm(p2 - p1))
+                new_len, ok = QInputDialog.getDouble(
+                    self, "Edit Parametric Dimension",
+                    f"Enter new dimension length (mm) for {closest_line.layer} segment:",
+                    cur_len, 0.1, 50000.0, 2
+                )
+                if ok and new_len > 0.0 and abs(new_len - cur_len) > 1e-3:
+                    from ..engine.constraint_solver import Constraint, ConstraintType
+                    dist_c = Constraint(
+                        id=f"c_dist_{closest_line.id}",
+                        constraint_type=ConstraintType.DISTANCE,
+                        shape_ids=[closest_line.id],
+                        value=new_len
+                    )
+                    self.cad_engine.add_constraint(dist_c)
+                    self.cad_engine.solve_constraints()
+                    self.cad_engine._save_state(f"Parametric Dimension Edit ({new_len:.1f} mm)")
+                    self.rebuild_scene()
+                    self.shape_drawn.emit()
+                    self.statusBar_msg(f"Parametric dimension updated to {new_len:.2f} mm.")
+                    event.accept()
+                    return
+
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
