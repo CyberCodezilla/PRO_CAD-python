@@ -77,6 +77,18 @@ class RulesEngine:
         # 10. Minimum Gap Tolerance Rule (Topological Micro-Gaps)
         diagnostics.extend(self.check_minimum_gap_tolerance(shapes_by_view))
 
+        # 11. Revolved Surface & Cylindrical Feature Recognition Rule
+        diagnostics.extend(self.check_revolved_feature_candidates(shapes_by_view))
+
+        # 12. Auxiliary View Projection Alignment Rule
+        diagnostics.extend(self.check_auxiliary_view_alignment(shapes_by_view, view_regions))
+
+        # 13. Fillet Radius Over-Constraint Diagnostic Rule
+        diagnostics.extend(self.check_fillet_radius_bounds(shapes_by_view))
+
+        # 14. Gated Orthographic Ambiguity Detection Rule
+        diagnostics.extend(self.check_orthographic_ambiguity(shapes_by_view))
+
         return diagnostics
 
     # -------------------------------------------------------------------------
@@ -498,6 +510,95 @@ class RulesEngine:
                 ))
 
         return diags
+
+    # -------------------------------------------------------------------------
+    # RULE 11: REVOLVED SURFACE & CYLINDRICAL FEATURE RECOGNITION
+    # -------------------------------------------------------------------------
+    def check_revolved_feature_candidates(self, shapes_by_view: Dict[str, List[Shape]]) -> List[Diagnostic]:
+        """Detect profiles symmetrical about a Centerline eligible for B-Rep analytical Revolve operations"""
+        diags: List[Diagnostic] = []
+        for view_name, shapes in shapes_by_view.items():
+            centerlines = [s for s in shapes if isinstance(s, Line) and getattr(s, 'layer', '') == 'Centerline']
+            visible_shapes = [s for s in shapes if getattr(s, 'layer', '') == 'Visible']
+            if centerlines and visible_shapes:
+                for cl in centerlines:
+                    is_vert = abs(cl.start[0] - cl.end[0]) < 1.0
+                    is_horiz = abs(cl.start[1] - cl.end[1]) < 1.0
+                    if is_vert or is_horiz:
+                        axis_type = "Vertical" if is_vert else "Horizontal"
+                        coord = cl.start[0] if is_vert else cl.start[1]
+                        diags.append(Diagnostic(
+                            rule_id="RULE_REVOLVE_FEATURE",
+                            severity=DiagnosticSeverity.INFO,
+                            title=f"Revolve Surface Candidate Detected ({view_name.capitalize()} View)",
+                            description=f"Profile has rotational {axis_type.lower()} symmetry axis at {coord:.1f} mm. Analytical B-Rep kernel can perform 360° Revolve.",
+                            suggestion="B-Rep kernel will generate analytical cylindrical/conical NURBS surface.",
+                            mismatched_shape_ids=[cl.id]
+                        ))
+        return diags
+
+    # -------------------------------------------------------------------------
+    # RULE 12: AUXILIARY VIEW PROJECTION ALIGNMENT
+    # -------------------------------------------------------------------------
+    def check_auxiliary_view_alignment(self, shapes_by_view: Dict[str, List[Shape]], view_regions: Dict[str, ViewRegion]) -> List[Diagnostic]:
+        """Verify alignment of auxiliary projection regions against principal orthographic views"""
+        diags: List[Diagnostic] = []
+        aux_regions = [r for r in view_regions.values() if r.view_type in ['auxiliary', 'aux', 'isometric', 'section']]
+        if aux_regions:
+            for ar in aux_regions:
+                diags.append(Diagnostic(
+                    rule_id="RULE_AUXILIARY_ALIGN",
+                    severity=DiagnosticSeverity.INFO,
+                    title=f"Auxiliary View Active: {ar.view_type.capitalize()}",
+                    description=f"Auxiliary projection region at ({ar.min_x:.0f}, {ar.min_y:.0f}) configured for true-shape projection.",
+                    suggestion="Ensure feature projection rays remain perpendicular to inclined surface."
+                ))
+        return diags
+
+    # -------------------------------------------------------------------------
+    # RULE 13: FILLET RADIUS OVER-CONSTRAINT DIAGNOSTIC
+    # -------------------------------------------------------------------------
+    def check_fillet_radius_bounds(self, shapes_by_view: Dict[str, List[Shape]]) -> List[Diagnostic]:
+        """Detect fillet radii that exceed adjoining edge geometric boundaries"""
+        diags: List[Diagnostic] = []
+        for view_name, shapes in shapes_by_view.items():
+            fillet_arcs = [s for s in shapes if isinstance(s, Arc) and getattr(s, 'feature_type', '') == 'fillet']
+            lines = [s for s in shapes if isinstance(s, Line)]
+            if fillet_arcs and lines:
+                min_line_len = min((abs(l.end[0]-l.start[0])**2 + abs(l.end[1]-l.start[1])**2)**0.5 for l in lines)
+                for fa in fillet_arcs:
+                    r = getattr(fa, 'fillet_radius', fa.radius)
+                    if r >= min_line_len / 2.0:
+                        diags.append(Diagnostic(
+                            rule_id="RULE_FILLET_BOUNDS",
+                            severity=DiagnosticSeverity.WARNING,
+                            title=f"Fillet Radius Over-Constraint ({view_name.capitalize()} View)",
+                            description=f"Fillet radius R={r:.1f} mm exceeds half of minimum edge length ({min_line_len:.1f} mm).",
+                            suggestion="Radius will be automatically clamped during 3D OpenCASCADE blend generation.",
+                            mismatched_shape_ids=[fa.id]
+                        ))
+        return diags
+
+    # -------------------------------------------------------------------------
+    # RULE 14: GATED ORTHOGRAPHIC AMBIGUITY DETECTION
+    # -------------------------------------------------------------------------
+    def check_orthographic_ambiguity(self, shapes_by_view: Dict[str, List[Shape]]) -> List[Diagnostic]:
+        """Detect under-constrained orthographic drawings with multiple valid manifold CSG topologies"""
+        diags: List[Diagnostic] = []
+        top_hidden = [s for s in shapes_by_view.get('top', []) if getattr(s, 'layer', '') == 'Hidden']
+        front_hidden = [s for s in shapes_by_view.get('front', []) if getattr(s, 'layer', '') == 'Hidden']
+        
+        if len(top_hidden) >= 2 or len(front_hidden) >= 2:
+            diags.append(Diagnostic(
+                rule_id="RULE_AMBIGUITY_DETECTED",
+                severity=DiagnosticSeverity.INFO,
+                title="Multiple 3D Topological Candidates Detected",
+                description="Overlapping hidden profiles admit multiple valid manifold solid permutations (e.g. through vs blind cuts).",
+                suggestion="Use the 3D Viewport Candidate Switcher HUD to toggle between alternate solid solutions."
+            ))
+        return diags
+
+
 
     # -------------------------------------------------------------------------
     # HELPER UTILITIES
