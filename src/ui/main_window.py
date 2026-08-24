@@ -21,6 +21,9 @@ from .viewport_3d import OpenGLViewport
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
 from ..reconstruction.reconstructor import Reconstructor3D
+from ..reconstruction.brep_reconstructor import BRepReconstructionWorker, HAS_BUILD123D
+from ..utils.step_exporter import StepExporter
+from ..cv.ai_vectorizer import RasterCADVectorizer, GNNInferenceBridge
 
 class MainWindow(QMainWindow):
     """Main application window container"""
@@ -35,6 +38,10 @@ class MainWindow(QMainWindow):
         self.rules_engine = RulesEngine()
         self.reconstructor = Reconstructor3D()
         self.current_diagnostics: List[Diagnostic] = []
+        self.cached_brep_solid = None
+        self.cached_step_bytes: bytes = b""
+        self.cached_iges_bytes: bytes = b""
+        self.brep_worker: Optional[BRepReconstructionWorker] = None
         
         self._init_ui()
         self._create_menus()
@@ -110,6 +117,7 @@ class MainWindow(QMainWindow):
         
         # 3. Right Panel: 3D OpenGL Viewport
         self.viewport_3d = OpenGLViewport(self)
+        self.viewport_3d.candidate_switched.connect(self._on_candidate_switched)
         content_splitter.addWidget(self.viewport_3d)
         
         # Set splitter layout size ratio (60% 2D canvas, 40% 3D viewport)
@@ -202,6 +210,16 @@ class MainWindow(QMainWindow):
         export_3mf_action = QAction("Export 3MF...", self)
         export_3mf_action.triggered.connect(lambda: self._export_mesh('3mf'))
         file_menu.addAction(export_3mf_action)
+
+        file_menu.addSeparator()
+
+        export_step_action = QAction("Export STEP (AP214 / ISO 10303)...", self)
+        export_step_action.triggered.connect(self._export_step)
+        file_menu.addAction(export_step_action)
+
+        export_iges_action = QAction("Export IGES...", self)
+        export_iges_action.triggered.connect(self._export_iges)
+        file_menu.addAction(export_iges_action)
         
         file_menu.addSeparator()
         
@@ -264,6 +282,22 @@ class MainWindow(QMainWindow):
         reconstruct_action.setShortcut(QKeySequence("Ctrl+R"))
         reconstruct_action.triggered.connect(self._trigger_reconstruction)
         reconstruct_menu.addAction(reconstruct_action)
+
+        # Tools Menu
+        tools_menu = menubar.addMenu("&Tools")
+        
+        vectorize_action = QAction("Vectorize Scanned Drawing...", self)
+        vectorize_action.triggered.connect(self._vectorize_scanned_drawing)
+        tools_menu.addAction(vectorize_action)
+
+        solve_constraints_action = QAction("Solve Parametric Constraints", self)
+        solve_constraints_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        solve_constraints_action.triggered.connect(self._solve_all_constraints)
+        tools_menu.addAction(solve_constraints_action)
+
+        ai_autocomplete_action = QAction("AI Sketch Autocomplete (GNN)...", self)
+        ai_autocomplete_action.triggered.connect(self._run_ai_autocomplete)
+        tools_menu.addAction(ai_autocomplete_action)
         
         # Help Menu
         help_menu = menubar.addMenu("&Help")
@@ -477,6 +511,7 @@ class MainWindow(QMainWindow):
         front_shapes = self.cad_engine.get_local_shapes_for_view('front')
         side_shapes = self.cad_engine.get_local_shapes_for_view('side')
 
+        # Interactive CSG mesh worker (Fast sub-50ms viewport response)
         self.reconstructor.run_reconstruction(
             top_shapes,
             front_shapes,
@@ -486,6 +521,19 @@ class MainWindow(QMainWindow):
             angular_tolerance=tol,
             projection_type=proj_type
         )
+
+        # Background Master Analytical B-Rep Worker (OpenCASCADE STEP / IGES pipeline)
+        if HAS_BUILD123D:
+            if self.brep_worker and self.brep_worker.isRunning():
+                self.brep_worker.quit()
+                self.brep_worker.wait(100)
+            self.brep_worker = BRepReconstructionWorker(
+                top_shapes, front_shapes, side_shapes,
+                view_regions=self.cad_engine.view_regions,
+                projection_type=proj_type
+            )
+            self.brep_worker.finished_brep.connect(self._on_brep_finished)
+            self.brep_worker.start()
 
     def _on_reconstruction_finished(self, mesh):
         """Receive the reconstructed mesh safely on the GUI Thread and update OpenGLViewport"""
@@ -498,6 +546,155 @@ class MainWindow(QMainWindow):
             
         # Update right-side properties panel tree view
         self._update_properties_panel()
+
+    def _on_brep_finished(self, solid, step_bytes: bytes, iges_bytes: bytes, summary: str, candidates: list = None):
+        """Handle background completion of OpenCASCADE B-Rep solid model"""
+        self.cached_brep_solid = solid
+        self.cached_step_bytes = step_bytes
+        self.cached_iges_bytes = iges_bytes
+        self.candidate_solids = candidates or ([solid] if solid else [])
+        self.viewport_3d.set_candidates(len(self.candidate_solids), 0)
+        print(f"[B-Rep Kernel] {summary}")
+
+    def _on_candidate_switched(self, idx: int):
+        """Switch active solid solution candidate for export and preview"""
+        if hasattr(self, 'candidate_solids') and 0 <= idx < len(self.candidate_solids):
+            selected_solid = self.candidate_solids[idx]
+            self.cached_brep_solid = selected_solid
+            self.statusBar().showMessage(f"Active 3D Solution: Candidate {idx + 1} of {len(self.candidate_solids)}")
+
+    def _export_mesh(self, fmt: str):
+        """Export current 3D solid mesh to STL, OBJ, or 3MF format"""
+        mesh = getattr(self.viewport_3d, 'mesh', None)
+        if mesh is None or len(mesh.vertices) == 0:
+            QMessageBox.warning(self, "Export Warning", "No 3D solid model available to export. Reconstruct a 3D model first.")
+            return
+
+        filter_map = {
+            'stl': "Stereolithography Files (*.stl)",
+            'obj': "Wavefront OBJ Files (*.obj)",
+            '3mf': "3D Manufacturing Format Files (*.3mf)"
+        }
+        filename, _ = QFileDialog.getSaveFileName(self, f"Export {fmt.upper()}", "", filter_map.get(fmt, "All Files (*)"))
+        if filename:
+            try:
+                mesh.export(filename, file_type=fmt)
+                QMessageBox.information(self, "Export Success", f"Successfully exported 3D model to:\n{filename}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Failed", f"Failed to export {fmt.upper()} mesh:\n{str(e)}")
+
+    def _export_step(self):
+        """Export exact OpenCASCADE B-Rep solid as ISO-10303 STEP AP214 file with fallback"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export STEP Solid", "", "STEP Files (*.step *.stp)")
+        if not filename:
+            return
+
+        try:
+            if self.cached_step_bytes and len(self.cached_step_bytes) > 0:
+                with open(filename, 'wb') as f:
+                    f.write(self.cached_step_bytes)
+                QMessageBox.information(self, "Export Success", f"Successfully exported analytical B-Rep STEP to:\n{filename}")
+                return
+
+            # Faceted STEP Fallback
+            mesh = getattr(self.viewport_3d, 'mesh', None)
+            if mesh is not None and len(mesh.vertices) > 0:
+                step_str = StepExporter.export_mesh_to_step(mesh.vertices, mesh.faces, part_name="CAD_PRO_SOLID")
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(step_str)
+                QMessageBox.information(self, "Export Success", f"Successfully exported faceted STEP (ISO-10303 AP214) to:\n{filename}")
+            else:
+                QMessageBox.warning(self, "Export Warning", "No 3D model available to export.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export STEP file:\n{str(e)}")
+
+    def _export_iges(self):
+        """Export OpenCASCADE B-Rep solid as IGES file"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export IGES", "", "IGES Files (*.iges *.igs)")
+        if not filename:
+            return
+
+        try:
+            if self.cached_iges_bytes and len(self.cached_iges_bytes) > 0:
+                with open(filename, 'wb') as f:
+                    f.write(self.cached_iges_bytes)
+                QMessageBox.information(self, "Export Success", f"Successfully exported IGES solid to:\n{filename}")
+            else:
+                QMessageBox.warning(self, "Export Warning", "No analytical IGES solid available. Ensure valid watertight 2D profiles are drawn.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export IGES file:\n{str(e)}")
+
+    def _vectorize_scanned_drawing(self):
+        """Load and vectorize a scanned raster blueprint image into editable CAD entities"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select Scanned Technical Drawing", "",
+            "Drawing Images (*.png *.jpg *.jpeg *.bmp *.tiff *.tif);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        try:
+            self.statusBar().showMessage(f"Vectorizing scanned technical drawing from {filename}...")
+            vectorizer = RasterCADVectorizer(snap_tolerance=0.15, collinear_angle_deg=5.0)
+            shapes_by_quadrant = vectorizer.vectorize_image(filename)
+
+            total_added = 0
+            for view_key, shape_list in shapes_by_quadrant.items():
+                if view_key in self.cad_engine.shapes:
+                    self.cad_engine.shapes[view_key].extend(shape_list)
+                    total_added += len(shape_list)
+
+            self.cad_engine._save_state("Vectorize Scanned Drawing")
+            self._sync_all_views()
+            self._trigger_reconstruction()
+            QMessageBox.information(
+                self, "Vectorization Complete",
+                f"Successfully extracted and merged {total_added} vector CAD primitives from scanned blueprint into orthographic views."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Vectorization Failed", f"Could not vectorize drawing:\n{str(e)}")
+
+    def _solve_all_constraints(self):
+        """Execute mathematical constraint solver across all active parametric constraints"""
+        success, msg = self.cad_engine.solve_constraints()
+        self._sync_all_views()
+        self._trigger_reconstruction()
+        self.statusBar().showMessage(f"Constraint Solver: {msg}")
+        QMessageBox.information(self, "Constraint Solver", msg)
+
+    def _run_ai_autocomplete(self):
+        """Analyze orthographic alignment rays and suggest missing projected features"""
+        top_shapes = self.cad_engine.get_shapes('top')
+        front_shapes = self.cad_engine.get_shapes('front')
+        side_shapes = self.cad_engine.get_shapes('side')
+
+        suggestions = GNNInferenceBridge.infer_missing_edges(top_shapes, front_shapes, side_shapes)
+        if not suggestions:
+            QMessageBox.information(self, "AI Autocomplete", "All primary orthographic projection feature rays are consistent and fully aligned.")
+            return
+
+        msg_lines = ["<b>AI Suggested Sketch Completions:</b><ul>"]
+        for s in suggestions:
+            msg_lines.append(f"<li><b>{s['target_view'].upper()} View:</b> {s['reason']}</li>")
+        msg_lines.append("</ul>")
+
+        reply = QMessageBox.question(
+            self, "AI Sketch Completion",
+            "".join(msg_lines) + "<br/>Apply inferred feature alignment lines to your sketch?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            for s in suggestions:
+                view = s['target_view']
+                x_pos = s['suggested_x']
+                # Create construction alignment line
+                line = Line((x_pos, -200.0), (x_pos, 200.0), layer='Construction')
+                self.cad_engine.add_shape(line, view)
+            self._sync_all_views()
+            self.statusBar().showMessage("AI suggested alignment features added.")
+
+
 
     def _on_reconstruction_error(self, error_trace: str):
         """Handle error from background thread"""
