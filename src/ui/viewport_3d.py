@@ -8,10 +8,10 @@ import math
 import numpy as np
 from typing import Optional
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtCore import Qt, QPointF
+from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QMouseEvent, QWheelEvent, QCursor
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QPushButton, QWidget, QFrame
+    QHBoxLayout, QVBoxLayout, QPushButton, QWidget, QFrame, QLabel
 )
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -20,6 +20,7 @@ import trimesh
 
 class OpenGLViewport(QOpenGLWidget):
     """Native OpenGL widget for 3D mesh rendering using VBOs, VAOs, and 360° Unclamped Freelook Camera"""
+    candidate_switched = pyqtSignal(int)  # Emits selected candidate index
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,6 +33,10 @@ class OpenGLViewport(QOpenGLWidget):
         self.pan_y = 0.0
         self.last_mouse_pos = QPointF()
         self._is_panning = False
+
+        # Candidate disambiguation state
+        self.candidate_count = 1
+        self.current_candidate_idx = 0
 
         # VAO and VBO buffers
         self._vao = None
@@ -56,7 +61,7 @@ class OpenGLViewport(QOpenGLWidget):
         self._setup_overlay_toolbar()
 
     def _setup_overlay_toolbar(self):
-        """Create floating overlay toolbar for object-centric standard views"""
+        """Create floating overlay toolbar for object-centric standard views and candidate HUD"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -106,6 +111,73 @@ class OpenGLViewport(QOpenGLWidget):
             btn_layout.addWidget(btn)
 
         layout.addWidget(overlay_frame)
+
+        # Candidate Disambiguation HUD Frame (Module 2)
+        self.candidate_frame = QFrame(self)
+        self.candidate_frame.setStyleSheet("""
+            QFrame {
+                background-color: rgba(20, 40, 60, 230);
+                border: 1px solid #00E5FF;
+                border-radius: 6px;
+            }
+            QLabel {
+                color: #00E5FF;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton {
+                background-color: #0F52BA;
+                color: #FFFFFF;
+                border: 1px solid #00E5FF;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #00E5FF;
+                color: #000000;
+            }
+        """)
+        c_layout = QHBoxLayout(self.candidate_frame)
+        c_layout.setContentsMargins(8, 4, 8, 4)
+        c_layout.setSpacing(6)
+
+        self.candidate_label = QLabel("Multiple 3D Solutions (1 of 1)")
+        c_layout.addWidget(self.candidate_label)
+
+        self.prev_cand_btn = QPushButton("◀ Prev")
+        self.prev_cand_btn.clicked.connect(self._prev_candidate)
+        c_layout.addWidget(self.prev_cand_btn)
+
+        self.next_cand_btn = QPushButton("Next ▶")
+        self.next_cand_btn.clicked.connect(self._next_candidate)
+        c_layout.addWidget(self.next_cand_btn)
+
+        layout.addWidget(self.candidate_frame)
+        self.candidate_frame.hide()  # Hidden by default until ambiguous solutions detected
+
+    def set_candidates(self, count: int, current: int = 0):
+        """Update candidate count and visibility"""
+        self.candidate_count = count
+        self.current_candidate_idx = current
+        if count > 1:
+            self.candidate_label.setText(f"Multiple 3D Solutions ({current + 1} of {count})")
+            self.candidate_frame.show()
+        else:
+            self.candidate_frame.hide()
+
+    def _prev_candidate(self):
+        if self.candidate_count > 1:
+            self.current_candidate_idx = (self.current_candidate_idx - 1) % self.candidate_count
+            self.candidate_label.setText(f"Multiple 3D Solutions ({self.current_candidate_idx + 1} of {self.candidate_count})")
+            self.candidate_switched.emit(self.current_candidate_idx)
+
+    def _next_candidate(self):
+        if self.candidate_count > 1:
+            self.current_candidate_idx = (self.current_candidate_idx + 1) % self.candidate_count
+            self.candidate_label.setText(f"Multiple 3D Solutions ({self.current_candidate_idx + 1} of {self.candidate_count})")
+            self.candidate_switched.emit(self.current_candidate_idx)
 
     def set_mesh(self, mesh: trimesh.Trimesh):
         """Update viewport mesh, detect sharp edges, and upload data to GPU VBOs/VAOs"""
