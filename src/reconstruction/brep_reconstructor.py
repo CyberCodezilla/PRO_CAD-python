@@ -75,22 +75,22 @@ class BRepReconstructionWorker(QThread):
 
         solids_to_intersect: List[Solid] = []
 
-        # 2. Build Top View B-Rep Extrusion (Extruded along Z)
+        # 2. Build Top View B-Rep Extrusion (Extruded along Y axis)
         if top_local:
             top_face = self._build_brep_face(top_local)
             if top_face:
-                top_solid = bd.extrude(top_face, amount=extent * 2, both=True)
+                top_face_xz = top_face.rotate(Axis.X, -90)
+                top_solid = bd.extrude(top_face_xz, amount=extent * 2, both=True)
                 solids_to_intersect.append(top_solid)
 
-        # 3. Build Front View B-Rep Extrusion (Extruded along Y)
+        # 3. Build Front View B-Rep Extrusion (Extruded along Z axis)
         if front_local:
             front_face = self._build_brep_face(front_local)
             if front_face:
-                front_face_xz = front_face.rotate(Axis.X, 90)
-                front_solid = bd.extrude(front_face_xz, amount=extent * 2, both=True)
+                front_solid = bd.extrude(front_face, amount=extent * 2, both=True)
                 solids_to_intersect.append(front_solid)
 
-        # 4. Build Side View B-Rep Extrusion (Extruded along X)
+        # 4. Build Side View B-Rep Extrusion (Extruded along X axis)
         if side_local:
             side_face = self._build_brep_face(side_local)
             if side_face:
@@ -285,28 +285,29 @@ class BRepReconstructionWorker(QThread):
         return None
 
     def _get_local_shapes(self, raw_shapes: List[Any], view_name: str) -> List[Dict[str, Any]]:
-        """Normalize sheet shapes into local coordinate frame with guardrail offsets"""
-        region = self.view_regions.get(view_name)
-        origin_x = getattr(region, 'origin_x', 0.0) if region else 0.0
-        origin_y = getattr(region, 'origin_y', 0.0) if region else 0.0
-
+        """Normalize sheet shapes into local coordinate frame with v = -py vertical inversion"""
         normalized = []
         for s in raw_shapes:
             d = s.to_dict() if hasattr(s, 'to_dict') else dict(s)
             t = d.get('type')
+            def map_pt(px, py):
+                return (px, -py) if view_name in ('front', 'side') else (px, py)
             if t == 'rectangle':
                 rx, ry, rw, rh = d['rect']
-                d['rect'] = (rx - origin_x, ry - origin_y, rw, rh)
+                corners = [map_pt(rx, ry), map_pt(rx + rw, ry), map_pt(rx + rw, ry + rh), map_pt(rx, ry + rh)]
+                min_x = min(c[0] for c in corners)
+                min_y = min(c[1] for c in corners)
+                d['rect'] = (min_x, min_y, abs(rw), abs(rh))
             elif t in ('circle', 'arc'):
                 cx, cy = d['center']
-                d['center'] = (cx - origin_x, cy - origin_y)
+                d['center'] = map_pt(cx, cy)
             elif t == 'line':
                 sx, sy = d['start']
                 ex, ey = d['end']
-                d['start'] = (sx - origin_x, sy - origin_y)
-                d['end'] = (ex - origin_x, ey - origin_y)
+                d['start'] = map_pt(sx, sy)
+                d['end'] = map_pt(ex, ey)
             elif t == 'polygon':
-                d['points'] = [(px - origin_x, py - origin_y) for px, py in d.get('points', [])]
+                d['points'] = [map_pt(px, py) for px, py in d.get('points', [])]
             normalized.append(d)
         return normalized
 
