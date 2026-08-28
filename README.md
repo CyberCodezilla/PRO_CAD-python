@@ -28,16 +28,9 @@ In traditional manufacturing and mechanical engineering, there is a massive fric
 
 **Python CAD Pro solves this** with an automated, dual-kernel reconstruction pipeline that turns 2D orthographic sketches into validated 3D solid geometry and STEP AP214 assemblies instantly.
 
-```
-       2D Technical Drawings               Intelligent CAD Engine                 3D Manufacturing Output
-  +-------------------------------+      +--------------------------+      +---------------------------+
-  |  Quadrant II   |  Quadrant I  |      | - 2D Constraint Solver   |      | - Sub-50ms Realtime CSG   |
-  |   FRONT VIEW   |  SIDE VIEW   | ---> | - ASME Y14.5 CAD Doctor  | ---> | - OpenCASCADE B-Rep STEP  |
-  |----------------+--------------|      | - Ambiguity Disambiguator|      | - Seam-Free OpenGL 3D GPU |
-  |  Quadrant III  |  Quadrant IV |      | - CCW Normal Normalizer  |      | - STL / OBJ / 3MF Export  |
-  |    TOP VIEW    |  45° MITER   |      +--------------------------+      +---------------------------+
-  +-------------------------------+
-```
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/491883a4-de52-4afd-8079-999934075465" alt="Python CAD Pro End-to-End Reconstruction Workflow" width="95%" />
+</p>
 
 ---
 
