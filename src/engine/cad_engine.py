@@ -279,13 +279,13 @@ class CADEngine:
         self._save_state("Initial State")
         
     def init_default_quadrant_regions(self):
-        """Initialize standard 4-quadrant orthographic drafting sheet layout (infinite quadrant bounds)"""
-        # Top-Left Quadrant: Top View
-        self.view_regions['top'] = ViewRegion('top', (-50000.0, -50000.0, 0.0, 0.0))
-        # Bottom-Left Quadrant: Front View
-        self.view_regions['front'] = ViewRegion('front', (-50000.0, 0.0, 0.0, 50000.0))
-        # Bottom-Right Quadrant: Left Side / LHS View
-        self.view_regions['side'] = ViewRegion('left_side', (0.0, 0.0, 50000.0, 50000.0))
+        """Initialize standard 4-quadrant orthographic drafting sheet layout (First-Angle / European standard)"""
+        # Quadrant II (Top-Left): Front View (XY Elevation)
+        self.view_regions['front'] = ViewRegion('front', (-50000.0, -50000.0, 0.0, 0.0))
+        # Quadrant I (Top-Right): Side View (ZY Profile / Elevation)
+        self.view_regions['side'] = ViewRegion('left_side', (0.0, -50000.0, 50000.0, 0.0))
+        # Quadrant III (Bottom-Left): Top View (XZ Plan)
+        self.view_regions['top'] = ViewRegion('top', (-50000.0, 0.0, 0.0, 50000.0))
 
     def set_active_tool(self, tool_name: str):
         """Set active drawing tool"""
@@ -401,13 +401,26 @@ class CADEngine:
 
     def assign_shape_to_region(self, shape: Shape) -> str:
         """
-        Guardrail 3: Assign a shape to a ViewRegion based on its centroid.
-        Returns the region key ('top', 'front', 'side', or 'unassigned').
+        Assign a shape to a ViewRegion based on its centroid:
+        - Checks explicit user-defined ViewRegions first if present and finite
+        - Falls back to First-Angle standard quadrants:
+          * Cx <= 0 and Cy <= 0 -> 'front' (Quadrant II)
+          * Cx >= 0 and Cy <= 0 -> 'side' (Quadrant I)
+          * Cx <= 0 and Cy >= 0 -> 'top' (Quadrant III)
         """
         centroid = get_shape_centroid(shape)
+        # Check custom/finite regions first
         for key, region in self.view_regions.items():
-            if region.contains_point(centroid):
-                return key
+            if region.min_x > -10000.0 and region.max_x < 10000.0:
+                if region.contains_point(centroid):
+                    return key
+        cx, cy = centroid
+        if cx <= 0.0 and cy <= 0.0:
+            return 'front'
+        elif cx >= 0.0 and cy <= 0.0:
+            return 'side'
+        elif cx <= 0.0 and cy >= 0.0:
+            return 'top'
         return 'unassigned'
         
     def add_shape(self, shape: Shape, view: Optional[str] = None):
@@ -691,28 +704,22 @@ class CADEngine:
 
     def get_local_shapes_for_view(self, view_key: str) -> List[Dict[str, Any]]:
         """
-        Guardrails 1 & 4: Extract shapes converted to local coordinates.
-        - Bottom-left origin (x0, y0)
-        - Y-inversion: local_y = y0 - abs_y
-        - Right-side view mirroring: local_x = x0 - abs_x for right_side view
+        Extract shapes converted to local coordinates:
+        - If custom finite ViewRegion defined: maps relative to region origin (x0, y0) with Y-inversion
+        - Else (default infinite quadrants):
+          * Front View (Q2: X <= 0, Y <= 0): u = px, v = -py (positive 3D Y points up)
+          * Side View (Q1: X >= 0, Y <= 0): u = px (depth), v = -py (height)
+          * Top View (Q3: X <= 0, Y >= 0): u = px (width), w = py (depth away from front)
         """
         shapes = self.shapes.get(view_key, [])
         region = self.view_regions.get(view_key)
+        is_custom_finite = region and (region.min_x > -10000.0 and region.max_x < 10000.0)
         
-        # Default origin fallback if region not explicitly defined
-        if region:
+        if is_custom_finite:
             x0, y0 = region.origin
             is_right_side = (region.view_type == 'right_side')
         else:
-            # Fallback bounds of shapes in view
-            all_bounds = [self.get_shape_bounds(s) for s in shapes if self.get_shape_bounds(s) is not None]
-            if all_bounds:
-                min_xs = [b[0] for b in all_bounds]
-                max_ys = [b[3] for b in all_bounds]
-                x0 = min(min_xs)
-                y0 = max(max_ys)
-            else:
-                x0, y0 = (0.0, 0.0)
+            x0, y0 = (0.0, 0.0)
             is_right_side = False
 
         local_shapes = []
@@ -720,22 +727,25 @@ class CADEngine:
             d = shape.to_dict()
             t = d.get('type')
             
-            # Helper to map absolute point (px, py) -> (lx, ly)
             def map_pt(px: float, py: float) -> Tuple[float, float]:
-                lx = (x0 - px) if is_right_side else (px - x0)
-                ly = y0 - py  # Y-inversion: canvas Y grows down, local 3D Y grows up
-                return (lx, ly)
+                if is_custom_finite:
+                    lx = (x0 - px) if is_right_side else (px - x0)
+                    ly = y0 - py
+                    return (lx, ly)
+                if view_key in ('front', 'side'):
+                    return (px, -py)
+                else:  # 'top'
+                    return (px, py)
                 
             if t == 'line':
                 d['start'] = map_pt(d['start'][0], d['start'][1])
                 d['end'] = map_pt(d['end'][0], d['end'][1])
             elif t == 'rectangle':
                 x, y, w, h = d['rect']
-                lx1, ly1 = map_pt(x, y + h)  # bottom-left
-                lx2, ly2 = map_pt(x + w, y)  # top-right
-                lx_min = min(lx1, lx2)
-                ly_min = min(ly1, ly2)
-                d['rect'] = (lx_min, ly_min, abs(w), abs(h))
+                corners = [map_pt(x, y), map_pt(x + w, y), map_pt(x + w, y + h), map_pt(x, y + h)]
+                min_x = min(c[0] for c in corners)
+                min_y = min(c[1] for c in corners)
+                d['rect'] = (min_x, min_y, abs(w), abs(h))
             elif t in ['circle', 'arc']:
                 d['center'] = map_pt(d['center'][0], d['center'][1])
             elif t == 'polygon':

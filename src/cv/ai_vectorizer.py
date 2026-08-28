@@ -370,14 +370,14 @@ class RasterCADVectorizer:
         return (0.0, 0.0)
 
     def _classify_quadrant(self, centroid: Tuple[float, float]) -> str:
-        """Classify shape into orthographic view based on quadrant coordinate signs"""
+        """Classify shape into orthographic view based on quadrant coordinate signs (First-Angle layout)"""
         cx, cy = centroid
-        if cx < 0 and cy < 0:
-            return 'top'
-        elif cx < 0 and cy >= 0:
+        if cx <= 0 and cy <= 0:
             return 'front'
-        elif cx >= 0 and cy >= 0:
+        elif cx >= 0 and cy <= 0:
             return 'side'
+        elif cx <= 0 and cy >= 0:
+            return 'top'
         else:
             return 'unassigned'
 
