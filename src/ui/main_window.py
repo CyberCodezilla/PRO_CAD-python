@@ -1269,10 +1269,6 @@ class MainWindow(QMainWindow):
 
     def _import_dxf(self):
         """Import DXF wireframe entities into the active view canvas, handling LWPOLYLINE bulges and scaling"""
-        active_canvas = self.tab_widget.currentWidget()
-        if not active_canvas:
-            return
-            
         filename, _ = QFileDialog.getOpenFileName(self, "Import 2D DXF", "", "DXF Files (*.dxf)")
         if filename:
             try:
@@ -1292,7 +1288,7 @@ class MainWindow(QMainWindow):
                 elif insunits == 6:  # m -> mm
                     scale = 1000.0
                     
-                view_name = active_canvas.view_name
+                view_name = self.cad_engine.active_view_mode if self.cad_engine.active_view_mode != 'auto' else None
                 layer = self.cad_engine.active_layer
                 added_count = 0
                 
