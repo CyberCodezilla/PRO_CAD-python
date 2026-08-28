@@ -3,6 +3,8 @@ Main Window - Primary PyQt6 layout and controller coordinating MVC data flow.
 Integrates 2D vector graphic scenes, 3D OpenGL viewport, bottom command console, and reconstruction threads.
 """
 import json
+import urllib.request
+import urllib.error
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 from PyQt6.QtWidgets import (
@@ -12,8 +14,8 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QPushButton, QCheckBox, QComboBox, 
     QSlider, QDoubleSpinBox, QFormLayout, QDialog, QDialogButtonBox, QFrame
 )
-from PyQt6.QtCore import Qt, QPointF
-from PyQt6.QtGui import QAction, QKeySequence, QCursor, QColor, QBrush
+from PyQt6.QtCore import Qt, QPointF, QThread, pyqtSignal, QTimer, QUrl
+from PyQt6.QtGui import QAction, QKeySequence, QCursor, QColor, QBrush, QDesktopServices
 
 from .canvas import DrawingCanvas
 from .toolbar import DrawingToolbar
@@ -24,6 +26,58 @@ from ..reconstruction.reconstructor import Reconstructor3D
 from ..reconstruction.brep_reconstructor import BRepReconstructionWorker, HAS_BUILD123D
 from ..utils.step_exporter import StepExporter
 from ..cv.ai_vectorizer import RasterCADVectorizer, GNNInferenceBridge
+
+APP_VERSION = "v2.1.0"
+GITHUB_REPO = "CyberCodezilla/PRO_CAD-python"
+
+
+class UpdateCheckWorker(QThread):
+    """Background worker querying GitHub Releases API for new updates"""
+    update_available = pyqtSignal(str, str, str)  # latest_tag, html_url, release_body
+    up_to_date = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, current_version: str = APP_VERSION, repo: str = GITHUB_REPO, parent=None):
+        super().__init__(parent)
+        self.current_version = current_version
+        self.repo = repo
+
+    def run(self):
+        url = f"https://api.github.com/repos/{self.repo}/releases/latest"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "PythonCADPro-App",
+            "Accept": "application/vnd.github.v3+json"
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    tag_name = data.get("tag_name", "").strip()
+                    html_url = data.get("html_url", f"https://github.com/{self.repo}/releases")
+                    body = data.get("body", "")
+                    
+                    if tag_name and self._is_newer_version(tag_name, self.current_version):
+                        self.update_available.emit(tag_name, html_url, body)
+                    else:
+                        self.up_to_date.emit()
+                else:
+                    self.up_to_date.emit()
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    @staticmethod
+    def _is_newer_version(latest_tag: str, current_tag: str) -> bool:
+        """Compare semver strings e.g. v2.1.1 vs v2.1.0"""
+        def parse_version(tag: str):
+            clean = tag.lstrip("vV").split("-")[0]
+            parts = []
+            for p in clean.split("."):
+                try:
+                    parts.append(int(p))
+                except ValueError:
+                    parts.append(0)
+            return tuple(parts)
+        return parse_version(latest_tag) > parse_version(current_tag)
 
 class MainWindow(QMainWindow):
     """Main application window container"""
@@ -42,6 +96,7 @@ class MainWindow(QMainWindow):
         self.cached_step_bytes: bytes = b""
         self.cached_iges_bytes: bytes = b""
         self.brep_worker: Optional[BRepReconstructionWorker] = None
+        self.update_worker: Optional[UpdateCheckWorker] = None
         
         self._init_ui()
         self._create_menus()
@@ -49,6 +104,9 @@ class MainWindow(QMainWindow):
         
         # Initial status message
         self.statusBar().showMessage("Ready - Select a drawing tool and start drafting")
+
+        # Asynchronously check for GitHub releases in the background after UI renders
+        QTimer.singleShot(2500, lambda: self.check_for_updates(silent=True))
         
     def _init_ui(self):
         """Build layout panels"""
@@ -306,6 +364,18 @@ class MainWindow(QMainWindow):
         guide_action.setShortcut(QKeySequence("F1"))
         guide_action.triggered.connect(self._show_help_dialog)
         help_menu.addAction(guide_action)
+
+        help_menu.addSeparator()
+
+        check_update_action = QAction("Check for &Updates...", self)
+        check_update_action.triggered.connect(lambda: self.check_for_updates(silent=False))
+        help_menu.addAction(check_update_action)
+
+        help_menu.addSeparator()
+
+        about_action = QAction(f"&About Python CAD Pro ({APP_VERSION})", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
         
     def _apply_theme(self):
         """Apply the neutral, high-contrast visual system used by the workspace."""
@@ -1426,3 +1496,66 @@ class MainWindow(QMainWindow):
             warnings.append("Z depth coordinate mismatch between Top and Side views (sketches misaligned).")
             
         return len(warnings) == 0, warnings
+
+    def check_for_updates(self, silent: bool = False):
+        """Asynchronously query GitHub Releases API to detect newer version"""
+        if self.update_worker and self.update_worker.isRunning():
+            return
+            
+        self.update_worker = UpdateCheckWorker(APP_VERSION, GITHUB_REPO, self)
+        
+        def on_update(latest_version: str, html_url: str, release_notes: str):
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Update Available — Python CAD Pro")
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setText(
+                f"<h3>A newer version of Python CAD Pro is available!</h3>"
+                f"<p>Installed version: <b>{APP_VERSION}</b><br>"
+                f"Latest release: <b style='color:#00E5FF;'>{latest_version}</b></p>"
+            )
+            
+            if release_notes:
+                preview = release_notes[:400] + ("..." if len(release_notes) > 400 else "")
+                msg_box.setInformativeText(f"<b>Release Notes:</b><br><pre>{preview}</pre>")
+                
+            download_btn = msg_box.addButton("Download Release", QMessageBox.ButtonRole.AcceptRole)
+            remind_btn = msg_box.addButton("Remind Me Later", QMessageBox.ButtonRole.RejectRole)
+            msg_box.setDefaultButton(download_btn)
+            
+            msg_box.exec()
+            if msg_box.clickedButton() == download_btn:
+                QDesktopServices.openUrl(QUrl(html_url))
+
+        def on_up_to_date():
+            if not silent:
+                QMessageBox.information(
+                    self, 
+                    "No Updates Found", 
+                    f"You are running the latest version of Python CAD Pro ({APP_VERSION})."
+                )
+
+        def on_error(err_msg: str):
+            if not silent:
+                QMessageBox.warning(
+                    self,
+                    "Update Check",
+                    f"Unable to check for updates at this time.\n\nDetails: {err_msg}"
+                )
+
+        self.update_worker.update_available.connect(on_update)
+        self.update_worker.up_to_date.connect(on_up_to_date)
+        self.update_worker.error_occurred.connect(on_error)
+        self.update_worker.start()
+
+    def _show_about_dialog(self):
+        """Show About application modal"""
+        QMessageBox.about(
+            self,
+            "About Python CAD Pro",
+            f"<h2>Python CAD Pro {APP_VERSION}</h2>"
+            f"<p>Industrial-Grade 2D Drafting & Orthographic 3D CSG / B-Rep Reconstruction Engine.</p>"
+            f"<p>Built with PyQt6, PyOpenGL, Manifold3D, and OpenCASCADE Technology.</p>"
+            f"<hr/>"
+            f"<p>Developed with ❤️ by <b>Sahil Rane (CyberCodezilla)</b>.</p>"
+            f"<p><a href='https://github.com/{GITHUB_REPO}'>GitHub Repository</a></p>"
+        )
