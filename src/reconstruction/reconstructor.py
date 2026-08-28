@@ -52,7 +52,7 @@ class ReconstructionWorker(QThread):
             print("CSG Reconstruction background thread started...")
             
             # 1. Compute 3D coordinate bounding limits for extrusions
-            top_limits = self._get_view_bounds_3d(self.top_shapes, 'top', self.projection_type)
+            top_limits = self._get_view_bounds_3d(self.top_shapes, 'top')
             front_limits = self._get_view_bounds_3d(self.front_shapes, 'front')
             side_limits = self._get_view_bounds_3d(self.side_shapes, 'side')
             
@@ -62,12 +62,16 @@ class ReconstructionWorker(QThread):
             z_min_side, z_max_side, y_min_side, y_max_side = side_limits
             
             # Align boundaries globally
-            x_min = min(x_min_top, x_min_front)
-            x_max = max(x_max_top, x_max_front)
-            y_min = min(y_min_front, y_min_side)
-            y_max = max(y_max_front, y_max_side)
-            z_min = min(z_min_top, z_min_side)
-            z_max = max(z_max_top, z_max_side)
+            x_min = min(x_min_front, x_min_top) if (self.front_shapes or self.top_shapes) else -50.0
+            x_max = max(x_max_front, x_max_top) if (self.front_shapes or self.top_shapes) else 50.0
+            y_min = min(y_min_front, y_min_side) if (self.front_shapes or self.side_shapes) else 0.0
+            y_max = max(y_max_front, y_max_side) if (self.front_shapes or self.side_shapes) else 100.0
+            z_min = min(z_min_top, z_min_side) if (self.top_shapes or self.side_shapes) else 0.0
+            z_max = max(z_max_top, z_max_side) if (self.top_shapes or self.side_shapes) else 100.0
+            
+            h_x = max(x_max - x_min, 10.0)
+            h_y = max(y_max - y_min, 10.0)
+            h_z = max(z_max - z_min, 10.0)
             
             # 2. Extract 2D profiles using Shapely (outer boundaries and subtractive holes)
             poly_top = self._extract_view_profile(self.top_shapes)
@@ -80,75 +84,62 @@ class ReconstructionWorker(QThread):
             
             # Top view extrusion (along Y axis)
             if poly_top is not None and not poly_top.is_empty:
-                h_y = y_max - y_min
-                if h_y > 0.1:
-                    # Mirror vertical coordinate input to preserve CCW winding order under reflection
-                    poly_top_mirrored = shapely.affinity.scale(poly_top, yfact=-1.0, origin=(0, 0))
-                    mesh_top = self._extrude_profile(poly_top_mirrored, h_y)
+                poly_top_ccw = self._orient_ccw(poly_top)
+                mesh_top = self._extrude_profile(poly_top_ccw, h_y)
+                if mesh_top is not None:
+                    # 4x4 matrix: local (u, w, t, 1) -> 3D (X, Y, Z, 1)
+                    # X = u, Y = t + y_min, Z = w
+                    M_top = np.array([
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, y_min],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ])
+                    v_local = mesh_top.vertices
+                    v_hom = np.column_stack([v_local, np.ones(len(v_local))])
+                    mesh_top.vertices = (M_top @ v_hom.T).T[:, :3]
+                    mesh_top = self._prepare_mesh(mesh_top)
                     if mesh_top is not None:
-                        # 4x4 matrix: local (u, v, w, 1) -> 3D (X, Y, Z, 1)
-                        # X = u, Y = w + y_min, Z = -v (since we mirrored, -v restores correct Z)
-                        # In third-angle layout the Top View is above the datum
-                        # and the LHS view is to the right, so both represent
-                        # positive physical depth. The previous fixed -Z mapping
-                        # placed these profiles on opposite sides of the solid.
-                        top_depth_sign = 1.0 if self.projection_type == '3rd_angle' else -1.0
-                        M_top = np.array([
-                            [1.0,  0.0, 0.0, 0.0],
-                            [0.0,  0.0, 1.0, y_min],
-                            [0.0, top_depth_sign, 0.0, 0.0],
-                            [0.0,  0.0, 0.0, 1.0]
-                        ])
-                        v_local = mesh_top.vertices
-                        v_hom = np.column_stack([v_local, np.ones(len(v_local))])
-                        v_3d = (M_top @ v_hom.T).T[:, :3]
-                        mesh_top.vertices = v_3d
-                        mesh_top = self._prepare_mesh(mesh_top)
                         extruded_meshes.append(('top', mesh_top))
                     
             # Front view extrusion (along Z axis)
             if poly_front is not None and not poly_front.is_empty:
-                h_z = z_max - z_min
-                if h_z > 0.1:
-                    # Front view projection is naturally right-handed, no mirror needed
-                    mesh_front = self._extrude_profile(poly_front, h_z)
+                poly_front_ccw = self._orient_ccw(poly_front)
+                mesh_front = self._extrude_profile(poly_front_ccw, h_z)
+                if mesh_front is not None:
+                    # 4x4 matrix: local (u, v, t, 1) -> 3D (X, Y, Z, 1)
+                    # X = u, Y = v, Z = t + z_min
+                    M_front = np.array([
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, z_min],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ])
+                    v_local = mesh_front.vertices
+                    v_hom = np.column_stack([v_local, np.ones(len(v_local))])
+                    mesh_front.vertices = (M_front @ v_hom.T).T[:, :3]
+                    mesh_front = self._prepare_mesh(mesh_front)
                     if mesh_front is not None:
-                        # 4x4 matrix: local (u, v, w, 1) -> 3D (X, Y, Z, 1)
-                        # X = u, Y = v, Z = w + z_min
-                        M_front = np.array([
-                            [1.0, 0.0, 0.0, 0.0],
-                            [0.0, 1.0, 0.0, 0.0],
-                            [0.0, 0.0, 1.0, z_min],
-                            [0.0, 0.0, 0.0, 1.0]
-                        ])
-                        v_local = mesh_front.vertices
-                        v_hom = np.column_stack([v_local, np.ones(len(v_local))])
-                        v_3d = (M_front @ v_hom.T).T[:, :3]
-                        mesh_front.vertices = v_3d
-                        mesh_front = self._prepare_mesh(mesh_front)
                         extruded_meshes.append(('front', mesh_front))
                     
             # Side view extrusion (along X axis)
             if poly_side is not None and not poly_side.is_empty:
-                h_x = x_max - x_min
-                if h_x > 0.1:
-                    # Mirror vertical coordinate to preserve CCW handedness under X-Z swap
-                    poly_side_mirrored = shapely.affinity.scale(poly_side, yfact=-1.0, origin=(0, 0))
-                    mesh_side = self._extrude_profile(poly_side_mirrored, h_x)
+                poly_side_ccw = self._orient_ccw(poly_side)
+                mesh_side = self._extrude_profile(poly_side_ccw, h_x)
+                if mesh_side is not None:
+                    # 4x4 matrix: local (u, v, t, 1) -> 3D (X, Y, Z, 1)
+                    # X = t + x_min, Y = v, Z = u
+                    M_side = np.array([
+                        [0.0, 0.0, 1.0, x_min],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ])
+                    v_local = mesh_side.vertices
+                    v_hom = np.column_stack([v_local, np.ones(len(v_local))])
+                    mesh_side.vertices = (M_side @ v_hom.T).T[:, :3]
+                    mesh_side = self._prepare_mesh(mesh_side)
                     if mesh_side is not None:
-                        # 4x4 matrix: local (u, v, w, 1) -> 3D (X, Y, Z, 1)
-                        # X = w + x_min, Y = -v, Z = u
-                        M_side = np.array([
-                            [0.0,  0.0, 1.0, x_min],
-                            [0.0, -1.0, 0.0, 0.0],
-                            [1.0,  0.0, 0.0, 0.0],
-                            [0.0,  0.0, 0.0, 1.0]
-                        ])
-                        v_local = mesh_side.vertices
-                        v_hom = np.column_stack([v_local, np.ones(len(v_local))])
-                        v_3d = (M_side @ v_hom.T).T[:, :3]
-                        mesh_side.vertices = v_3d
-                        mesh_side = self._prepare_mesh(mesh_side)
                         extruded_meshes.append(('side', mesh_side))
                     
             # 4. Perform CSG Boolean Intersection
@@ -272,42 +263,53 @@ class ReconstructionWorker(QThread):
                 
         return None
 
+    @staticmethod
+    def _orient_ccw(geometry):
+        """Guardrail 1: Explicitly normalize Shapely polygons to Counter-Clockwise (sign=1.0)"""
+        if geometry is None or geometry.is_empty:
+            return None
+        if isinstance(geometry, sg.Polygon):
+            return sg.polygon.orient(geometry, sign=1.0)
+        elif isinstance(geometry, sg.MultiPolygon):
+            return sg.MultiPolygon([sg.polygon.orient(p, sign=1.0) for p in geometry.geoms if not p.is_empty])
+        return geometry
+
     def _get_view_bounds_3d(self, shapes: List[Dict[str, Any]], view_name: str, projection_type: str = '3rd_angle') -> Tuple[float, float, float, float]:
-        """Compute bounds in the same coordinate system used by each extrusion."""
+        """Compute bounds in local coordinate system used by each extrusion."""
         if not shapes:
-            return (-50.0, 50.0, -50.0, 50.0)
+            return (-50.0, 50.0, 0.0, 100.0)
 
         horiz_vals = []
         vert_vals = []
-        top_uses_positive_depth = view_name == 'top' and projection_type == '3rd_angle'
 
         for s in shapes:
             t = s.get('type')
             if t == 'rectangle':
                 x, y, w, h = s['rect']
                 horiz_vals.extend([x, x + w])
-                vert_vals.extend([y, y + h] if top_uses_positive_depth else [-(y + h), -y])
+                vert_vals.extend([y, y + h])
             elif t == 'circle':
                 cx, cy = s['center']
                 r = s['radius']
                 horiz_vals.extend([cx - r, cx + r])
-                vert_vals.extend([cy - r, cy + r] if top_uses_positive_depth else [-cy - r, -cy + r])
+                vert_vals.extend([cy - r, cy + r])
             elif t == 'polygon':
                 for p in s['points']:
                     horiz_vals.append(p[0])
-                    vert_vals.append(p[1] if top_uses_positive_depth else -p[1])
+                    vert_vals.append(p[1])
             elif t == 'line':
                 start, end = s['start'], s['end']
                 horiz_vals.extend([start[0], end[0]])
-                vert_vals.extend(([start[1], end[1]]) if top_uses_positive_depth else ([-start[1], -end[1]]))
+                vert_vals.extend([start[1], end[1]])
             elif t == 'arc':
                 cx, cy, r = s['center'][0], s['center'][1], s['radius']
                 horiz_vals.extend([cx - r, cx + r])
-                vert_vals.extend([cy - r, cy + r] if top_uses_positive_depth else [-cy - r, -cy + r])
+                vert_vals.extend([cy - r, cy + r])
 
         if not horiz_vals or not vert_vals:
-            return (-50.0, 50.0, -50.0, 50.0)
+            return (-50.0, 50.0, 0.0, 100.0)
         return (min(horiz_vals), max(horiz_vals), min(vert_vals), max(vert_vals))
+
     def _extract_view_profile(self, shapes: List[Dict[str, Any]]) -> Optional[sg.Polygon]:
         """Assemble outer silhouettes and nested subtractive loops into a single Shapely Polygon"""
         if not shapes:
@@ -318,7 +320,7 @@ class ReconstructionWorker(QThread):
         visible_lines = []
         hidden_lines = []
         
-        # 1. Convert drawing primitives to Shapely geometries
+        # 1. Convert drawing primitives to Shapely geometries using direct local coordinates
         for s in shapes:
             t = s.get('type')
             layer = s.get('layer', 'Visible')
@@ -327,10 +329,9 @@ class ReconstructionWorker(QThread):
             if layer == 'Construction':
                 continue
                 
-            # Project canvas Y coordinates correctly to 3D projection space (multiply Y by -1)
             if t == 'rectangle':
                 x, y, w, h = s['rect']
-                poly = sg.box(x, -(y+h), x+w, -y)
+                poly = sg.box(x, y, x + w, y + h)
                 if layer == 'Hidden':
                     hidden_polys.append(poly)
                 else:
@@ -340,7 +341,7 @@ class ReconstructionWorker(QThread):
                 cx, cy = s['center']
                 r = s['radius']
                 q_segs = max(8, int(np.ceil(90.0 / self.angular_tolerance)))
-                poly = sg.Point(cx, -cy).buffer(r, quad_segs=q_segs)
+                poly = sg.Point(cx, cy).buffer(r, quad_segs=q_segs)
                 if layer == 'Hidden':
                     hidden_polys.append(poly)
                 else:
@@ -357,7 +358,7 @@ class ReconstructionWorker(QThread):
                 
                 num_segs = max(4, int(np.ceil(sweep / self.angular_tolerance)))
                 angles = np.radians(np.linspace(start_angle, start_angle + sweep, num_segs + 1))
-                pts = [(cx + r * np.cos(a), -cy + r * np.sin(a)) for a in angles]
+                pts = [(cx + r * np.cos(a), cy + r * np.sin(a)) for a in angles]
                 arc_geom = sg.LineString(pts)
                 if layer == 'Hidden':
                     hidden_lines.append(arc_geom)
@@ -365,7 +366,7 @@ class ReconstructionWorker(QThread):
                     visible_lines.append(arc_geom)
                     
             elif t == 'polygon':
-                pts = [(p[0], -p[1]) for p in s['points']]
+                pts = [(p[0], p[1]) for p in s['points']]
                 if len(pts) >= 3:
                     poly = sg.Polygon(pts)
                     if layer == 'Hidden':
@@ -376,7 +377,7 @@ class ReconstructionWorker(QThread):
             elif t == 'line':
                 start = s['start']
                 end = s['end']
-                line_geom = sg.LineString([(start[0], -start[1]), (end[0], -end[1])])
+                line_geom = sg.LineString([start, end])
                 if layer == 'Hidden':
                     hidden_lines.append(line_geom)
                 else:
@@ -426,9 +427,10 @@ class ReconstructionWorker(QThread):
         if not final_profiles:
             return None
 
-        # 5. Union all separate visible islands, then normalize once more so
-        # extrusion never receives self-intersecting rings or zero-area fragments.
-        return self._normalize_polygonal(so.unary_union(final_profiles))
+        # 5. Union all separate visible islands and ensure CCW orientation
+        combined = self._normalize_polygonal(so.unary_union(final_profiles))
+        return self._orient_ccw(combined)
+
 
 class Reconstructor3D:
     """CSG reconstruction pipeline coordinator"""
@@ -437,48 +439,142 @@ class Reconstructor3D:
         self.current_mesh: Optional[trimesh.Trimesh] = None
         self.worker: Optional[ReconstructionWorker] = None
         
-    def _get_view_bounds_3d(self, shapes: List[Dict[str, Any]], view_name: str) -> Tuple[float, float, float, float]:
-        """Compute projection-space coordinates of a view's bounding limits"""
-        if not shapes:
-            return (-50.0, 50.0, -50.0, 50.0)
-            
-        horiz_vals = []
-        vert_vals = []
+    def reconstruct(self, shapes: Dict[str, List[Any]], angular_tolerance: float = 10.0) -> Optional[trimesh.Trimesh]:
+        """Synchronously reconstruct 3D mesh from shapes dictionary {'top': ..., 'front': ..., 'side': ...}"""
+        top_shapes = shapes.get('top', [])
+        front_shapes = shapes.get('front', [])
+        side_shapes = shapes.get('side', [])
         
-        for s in shapes:
-            t = s.get('type')
-            if t == 'rectangle':
-                x, y, w, h = s['rect']
-                horiz_vals.extend([x, x + w])
-                vert_vals.extend([-(y + h), -y])
-            elif t == 'circle':
-                cx, cy = s['center']
-                r = s['radius']
-                horiz_vals.extend([cx - r, cx + r])
-                vert_vals.extend([-cy - r, -cy + r])
-            elif t == 'polygon':
-                for p in s['points']:
-                    horiz_vals.append(p[0])
-                    vert_vals.append(-p[1])
-            elif t == 'line':
-                start = s['start']
-                end = s['end']
-                horiz_vals.extend([start[0], end[0]])
-                vert_vals.extend([-start[1], -end[1]])
-                
-        if not horiz_vals or not vert_vals:
-            return (-50.0, 50.0, -50.0, 50.0)
-            
-        return (min(horiz_vals), max(horiz_vals), min(vert_vals), max(vert_vals))
+        def to_local(shapes_list, view_key):
+            res = []
+            for s in shapes_list:
+                d = s.to_dict() if hasattr(s, 'to_dict') else dict(s)
+                t = d.get('type')
+                def map_pt(px, py):
+                    return (px, -py) if view_key in ('front', 'side') else (px, py)
+                if t == 'line':
+                    d['start'] = map_pt(d['start'][0], d['start'][1])
+                    d['end'] = map_pt(d['end'][0], d['end'][1])
+                elif t == 'rectangle':
+                    x, y, w, h = d['rect']
+                    corners = [map_pt(x, y), map_pt(x + w, y), map_pt(x + w, y + h), map_pt(x, y + h)]
+                    min_x = min(c[0] for c in corners)
+                    min_y = min(c[1] for c in corners)
+                    d['rect'] = (min_x, min_y, abs(w), abs(h))
+                elif t in ('circle', 'arc'):
+                    d['center'] = map_pt(d['center'][0], d['center'][1])
+                elif t == 'polygon':
+                    d['points'] = [map_pt(p[0], p[1]) for p in d.get('points', [])]
+                res.append(d)
+            return res
+
+        top_dicts = to_local(top_shapes, 'top')
+        front_dicts = to_local(front_shapes, 'front')
+        side_dicts = to_local(side_shapes, 'side')
         
+        worker = ReconstructionWorker(top_dicts, front_dicts, side_dicts, angular_tolerance)
+        
+        top_limits = worker._get_view_bounds_3d(worker.top_shapes, 'top')
+        front_limits = worker._get_view_bounds_3d(worker.front_shapes, 'front')
+        side_limits = worker._get_view_bounds_3d(worker.side_shapes, 'side')
+        
+        x_min_top, x_max_top, z_min_top, z_max_top = top_limits
+        x_min_front, x_max_front, y_min_front, y_max_front = front_limits
+        z_min_side, z_max_side, y_min_side, y_max_side = side_limits
+        
+        x_min = min(x_min_front, x_min_top) if (worker.front_shapes or worker.top_shapes) else -50.0
+        x_max = max(x_max_front, x_max_top) if (worker.front_shapes or worker.top_shapes) else 50.0
+        y_min = min(y_min_front, y_min_side) if (worker.front_shapes or worker.side_shapes) else 0.0
+        y_max = max(y_max_front, y_max_side) if (worker.front_shapes or worker.side_shapes) else 100.0
+        z_min = min(z_min_top, z_min_side) if (worker.top_shapes or worker.side_shapes) else 0.0
+        z_max = max(z_max_top, z_max_side) if (worker.top_shapes or worker.side_shapes) else 100.0
+        
+        h_x = max(x_max - x_min, 10.0)
+        h_y = max(y_max - y_min, 10.0)
+        h_z = max(z_max - z_min, 10.0)
+        
+        poly_top = worker._extract_view_profile(worker.top_shapes)
+        poly_front = worker._extract_view_profile(worker.front_shapes)
+        poly_side = worker._extract_view_profile(worker.side_shapes)
+        
+        extruded_meshes = []
+        if poly_top is not None and not poly_top.is_empty:
+            poly_top_ccw = worker._orient_ccw(poly_top)
+            mesh_top = worker._extrude_profile(poly_top_ccw, h_y)
+            if mesh_top is not None:
+                M_top = np.array([
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, y_min],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]
+                ])
+                v_local = mesh_top.vertices
+                v_hom = np.column_stack([v_local, np.ones(len(v_local))])
+                mesh_top.vertices = (M_top @ v_hom.T).T[:, :3]
+                mesh_top = worker._prepare_mesh(mesh_top)
+                if mesh_top is not None:
+                    extruded_meshes.append(('top', mesh_top))
+                    
+        if poly_front is not None and not poly_front.is_empty:
+            poly_front_ccw = worker._orient_ccw(poly_front)
+            mesh_front = worker._extrude_profile(poly_front_ccw, h_z)
+            if mesh_front is not None:
+                M_front = np.array([
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, z_min],
+                    [0.0, 0.0, 0.0, 1.0]
+                ])
+                v_local = mesh_front.vertices
+                v_hom = np.column_stack([v_local, np.ones(len(v_local))])
+                mesh_front.vertices = (M_front @ v_hom.T).T[:, :3]
+                mesh_front = worker._prepare_mesh(mesh_front)
+                if mesh_front is not None:
+                    extruded_meshes.append(('front', mesh_front))
+                    
+        if poly_side is not None and not poly_side.is_empty:
+            poly_side_ccw = worker._orient_ccw(poly_side)
+            mesh_side = worker._extrude_profile(poly_side_ccw, h_x)
+            if mesh_side is not None:
+                M_side = np.array([
+                    [0.0, 0.0, 1.0, x_min],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]
+                ])
+                v_local = mesh_side.vertices
+                v_hom = np.column_stack([v_local, np.ones(len(v_local))])
+                mesh_side.vertices = (M_side @ v_hom.T).T[:, :3]
+                mesh_side = worker._prepare_mesh(mesh_side)
+                if mesh_side is not None:
+                    extruded_meshes.append(('side', mesh_side))
+                    
+        if not extruded_meshes:
+            return None
+            
+        meshes_only = [m for name, m in extruded_meshes]
+        if len(meshes_only) == 1:
+            final_mesh = meshes_only[0]
+        else:
+            final_mesh = worker._boolean_intersection(meshes_only)
+            
+        if final_mesh is not None and hasattr(final_mesh, 'faces') and len(final_mesh.faces) > 0 and getattr(final_mesh.faces, 'ndim', 0) == 2:
+            try:
+                trimesh.repair.fill_holes(final_mesh)
+                trimesh.repair.fix_normals(final_mesh)
+                final_mesh.fill_holes()
+                final_mesh.fix_normals()
+            except Exception:
+                pass
+        self.current_mesh = final_mesh
+        return final_mesh
+
     def run_reconstruction(self, top_shapes: List[Shape], front_shapes: List[Shape], side_shapes: List[Shape], callback_finished, callback_error=None, angular_tolerance: float = 10.0, projection_type: str = '3rd_angle'):
         """Spawn ReconstructionWorker in a background thread to generate 3D mesh"""
-        # Cancel any active running workers
         if self.worker is not None and self.worker.isRunning():
             self.worker.terminate()
             self.worker.wait()
             
-        # Serialize shapes list to dictionary before handoff (thread-safe copies)
         top_dicts = [s if isinstance(s, dict) else s.to_dict() for s in top_shapes]
         front_dicts = [s if isinstance(s, dict) else s.to_dict() for s in front_shapes]
         side_dicts = [s if isinstance(s, dict) else s.to_dict() for s in side_shapes]
