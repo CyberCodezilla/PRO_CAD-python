@@ -198,14 +198,20 @@ class DrawingCanvas(QGraphicsView):
         self.temp_item = None
         self.temp_polygon_lines.clear()
         
-        # 1. Render View Regions
+        # 1. Render View Regions (First-Angle / European Standard: Q2 Front, Q1 Side, Q3 Top, Q4 Miter)
         active_mode = self.cad_engine.active_view_mode
         for key, region in self.cad_engine.view_regions.items():
             if region.min_x <= -10000.0 or region.max_x >= 10000.0:
-                if region.view_type == 'top':
+                if region.view_type == 'front':
+                    # Quadrant II (Top-Left)
                     rx, ry, rw, rh = (-2000.0, -2000.0, 2000.0, 2000.0)
                     tx, ty = (-390.0, -390.0)
-                elif region.view_type == 'front':
+                elif region.view_type in ('side', 'left_side', 'right_side'):
+                    # Quadrant I (Top-Right)
+                    rx, ry, rw, rh = (0.0, -2000.0, 2000.0, 2000.0)
+                    tx, ty = (10.0, -390.0)
+                elif region.view_type == 'top':
+                    # Quadrant III (Bottom-Left)
                     rx, ry, rw, rh = (-2000.0, 0.0, 2000.0, 2000.0)
                     tx, ty = (-390.0, 10.0)
                 else:
@@ -217,17 +223,17 @@ class DrawingCanvas(QGraphicsView):
 
             rect_item = QGraphicsRectItem(rx, ry, rw, rh)
             
-            if region.view_type == 'top':
-                color = QColor(40, 167, 69)      # Green for Top View
-                plane_name = "XZ Plane"
-            elif region.view_type == 'front':
-                color = QColor(0, 122, 204)      # Blue for Front View
+            if region.view_type == 'front':
+                color = QColor(0, 122, 204)      # Blue for Front View (XY)
                 plane_name = "XY Plane"
+            elif region.view_type == 'top':
+                color = QColor(40, 167, 69)      # Green for Top View (XZ)
+                plane_name = "XZ Plane"
             elif region.view_type == 'right_side':
                 color = QColor(230, 81, 0)       # Deep Orange for RHS View
                 plane_name = "ZY Plane (RHS)"
             else:
-                color = QColor(255, 193, 7)      # Amber/Yellow for LHS View
+                color = QColor(255, 193, 7)      # Amber/Yellow for Side/LHS View
                 plane_name = "ZY Plane (LHS)"
                 
             is_active = (active_mode == region.view_type or (active_mode in ['left_side', 'right_side'] and key == 'side'))
@@ -244,7 +250,7 @@ class DrawingCanvas(QGraphicsView):
             self.scene().addItem(rect_item)
             
             # Label header badge in quadrant corner
-            display_name = "LHS View" if region.view_type == 'left_side' else ("RHS View" if region.view_type == 'right_side' else f"{region.view_type.capitalize()} View")
+            display_name = "Side (LHS) View" if region.view_type == 'left_side' else ("Side (RHS) View" if region.view_type == 'right_side' else f"{region.view_type.capitalize()} View")
             active_tag = " [ACTIVE MODE]" if is_active else ""
             
             text_item = self.scene().addText(f"{display_name} ({plane_name}){active_tag}")
@@ -314,7 +320,6 @@ class DrawingCanvas(QGraphicsView):
                 badge.setFont(b_font)
                 badge.setPos(badge_pos.x() - 8, badge_pos.y() - 14)
 
-
     def _draw_unified_projection_lines(self):
         """Draw orthographic projection alignment guidelines & 45° Miter Line"""
         top = self.cad_engine.view_regions.get('top')
@@ -324,46 +329,34 @@ class DrawingCanvas(QGraphicsView):
         guide_pen = QPen(QColor('#666666'), 1, Qt.PenStyle.DashLine)
         guide_pen.setDashPattern([4, 4])
 
-        # Top to Front alignment lines (Width projection)
-        if top and front:
-            l1 = QGraphicsLineItem(top.min_x, top.max_y, front.min_x, front.min_y)
-            l1.setPen(guide_pen)
-            self.scene().addItem(l1)
-            l2 = QGraphicsLineItem(top.max_x, top.max_y, front.max_x, front.min_y)
-            l2.setPen(guide_pen)
-            self.scene().addItem(l2)
-
-        # Front to Side alignment lines (Height projection)
+        # Front (Q2) to Side (Q1) horizontal alignment lines (Height projection)
         if front and side:
-            l1 = QGraphicsLineItem(front.max_x, front.min_y, side.min_x, side.min_y)
+            l1 = QGraphicsLineItem(-2000, -100, 2000, -100)
             l1.setPen(guide_pen)
             self.scene().addItem(l1)
-            l2 = QGraphicsLineItem(front.max_x, front.max_y, side.min_x, side.max_y)
+
+        # Front (Q2) to Top (Q3) vertical alignment lines (Width projection)
+        if front and top:
+            l2 = QGraphicsLineItem(-100, -2000, -100, 2000)
             l2.setPen(guide_pen)
             self.scene().addItem(l2)
 
-        # 45° Miter Line projection (Top to Side Depth projection)
-        if getattr(self, 'show_miter_line', True) and top and side:
-            # Junction point at top right edge / origin
-            miter_x = top.max_x
-            miter_y = top.max_y
-            
+        # 45° Miter Line Guide in Quadrant IV (Bottom-Right: extends from (0,0) down-right (+t, +t))
+        if getattr(self, 'show_miter_line', True):
             miter_pen = QPen(QColor('#FF8C00'), 1.5, Qt.PenStyle.DashLine)
             miter_pen.setDashPattern([6, 3])
             
-            miter_len = max(top.height, side.width) + 80.0
-            # Extends at 45 degrees UP and RIGHT into the empty Top-Right Quadrant
-            miter_line = QGraphicsLineItem(miter_x, miter_y, miter_x + miter_len, miter_y - miter_len)
+            miter_line = QGraphicsLineItem(0.0, 0.0, 1500.0, 1500.0)
             miter_line.setPen(miter_pen)
             self.scene().addItem(miter_line)
             
-            label = self.scene().addText("45° Miter Line")
+            label = self.scene().addText("45° Miter Guide")
             label.setDefaultTextColor(QColor('#FF8C00'))
             font = label.font()
             font.setBold(True)
             font.setPointSize(9)
             label.setFont(font)
-            label.setPos(miter_x + 15, miter_y - 35)
+            label.setPos(20.0, 20.0)
         
     def _add_shape_to_scene(self, shape: Shape, is_unassigned: bool = False):
         """Construct QGraphicsItem for a Shape data model and style it based on layer"""
