@@ -9,6 +9,12 @@
 > **Industrial-grade 2D drafting, parametric constraint solving, and intelligent 3D orthographic reconstruction.**  
 > Transform standard 2D multi-view engineering drawings into watertight, manifold 3D solids and manufacturing-grade STEP models in real time.
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/d73bca41-0067-4661-b0d6-74484ad682ba" alt="Python CAD Pro Orthographic to 3D Demonstration" width="92%" />
+  <br>
+  <em>Real-time orthographic multi-view 2D drafting seamlessly reconstructed into an artifact-free 3D solid model.</em>
+</p>
+
 ---
 
 ## 🌟 What Problem Does Python CAD Pro Solve?
