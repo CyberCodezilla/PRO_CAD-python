@@ -179,8 +179,57 @@ class OpenGLViewport(QOpenGLWidget):
             self.candidate_label.setText(f"Multiple 3D Solutions ({self.current_candidate_idx + 1} of {self.candidate_count})")
             self.candidate_switched.emit(self.current_candidate_idx)
 
+    @staticmethod
+    def _compute_crease_aware_normals(mesh: trimesh.Trimesh, crease_angle_deg: float = 25.0):
+        """
+        Compute crease-aware split vertex normals for CAD rendering:
+        - Flattens faces into unrolled vertex buffers (F * 3, 3).
+        - For each face corner (face f, vertex v), averages the face normals of adjacent faces
+          sharing vertex v ONLY if the dihedral angle between the face normal and adjacent face normal <= crease_angle_deg.
+        - Planar faces and sharp edges (> crease_angle_deg) receive exact perpendicular face normals [0,0,1],
+          completely eliminating Gouraud ear-clipping diagonal crease artifacts across flat faces.
+        - Smooth curved features (cylinders, fillets with adjacent angle <= crease_angle_deg) retain smooth shading.
+        """
+        faces = mesh.faces  # (F, 3)
+        face_normals = mesh.face_normals.astype(np.float32)  # (F, 3)
+        num_faces = len(faces)
+        
+        unrolled_vertices = mesh.vertices[faces].reshape(-1, 3).astype(np.float32)
+        
+        num_vertices = len(mesh.vertices)
+        vertex_faces = [[] for _ in range(num_vertices)]
+        for f_idx, face in enumerate(faces):
+            for v_idx in face:
+                vertex_faces[v_idx].append(f_idx)
+                
+        cos_crease = float(np.cos(np.radians(crease_angle_deg)))
+        unrolled_normals = np.zeros_like(unrolled_vertices, dtype=np.float32)
+        
+        for f_idx in range(num_faces):
+            fn = face_normals[f_idx]
+            face = faces[f_idx]
+            for corner_idx, v_idx in enumerate(face):
+                adj_f_indices = vertex_faces[v_idx]
+                if len(adj_f_indices) == 1:
+                    unrolled_normals[f_idx * 3 + corner_idx] = fn
+                    continue
+                    
+                accum_normal = np.zeros(3, dtype=np.float32)
+                for adj_f in adj_f_indices:
+                    adj_fn = face_normals[adj_f]
+                    if np.dot(fn, adj_fn) >= cos_crease:
+                        accum_normal += adj_fn
+                        
+                norm = float(np.linalg.norm(accum_normal))
+                if norm > 1e-6:
+                    unrolled_normals[f_idx * 3 + corner_idx] = accum_normal / norm
+                else:
+                    unrolled_normals[f_idx * 3 + corner_idx] = fn
+                    
+        return unrolled_vertices, unrolled_normals
+
     def set_mesh(self, mesh: trimesh.Trimesh):
-        """Update viewport mesh, detect sharp edges, and upload data to GPU VBOs/VAOs"""
+        """Update viewport mesh, compute crease-aware split normals, detect sharp edges, and upload to GPU VBOs/VAOs"""
         self.mesh = mesh
         self.makeCurrent()
 
@@ -193,17 +242,16 @@ class OpenGLViewport(QOpenGLWidget):
             self.update()
             return
 
-        # Convert mesh elements to correct numpy datatypes
-        vertices = mesh.vertices.astype(np.float32).flatten()
-        normals = mesh.vertex_normals.astype(np.float32).flatten()
-        faces = mesh.faces.astype(np.uint32).flatten()
+        # Compute crease-aware split vertex normals
+        unrolled_vertices, unrolled_normals = self._compute_crease_aware_normals(mesh, crease_angle_deg=25.0)
+        vertices = unrolled_vertices.flatten()
+        normals = unrolled_normals.flatten()
+        self.num_indices = len(unrolled_vertices)
 
-        self.num_indices = len(faces)
-
-        # Identify sharp edges (face adjacency angle > 30 degrees)
+        # Identify sharp feature edges (face adjacency angle > 25 degrees)
         try:
             angles = mesh.face_adjacency_angles
-            sharp_mask = angles > np.radians(30.0)
+            sharp_mask = angles > np.radians(25.0)
             sharp_edges = mesh.face_adjacency_edges[sharp_mask]
             if len(sharp_edges) > 0:
                 edge_vertices = mesh.vertices[sharp_edges].astype(np.float32).flatten()
@@ -215,7 +263,7 @@ class OpenGLViewport(QOpenGLWidget):
             self.num_edge_vertices = 0
 
         # Generate and populate GPU buffers
-        self._vbo_vertices, self._vbo_normals, self._vbo_faces = glGenBuffers(3)
+        self._vbo_vertices, self._vbo_normals = glGenBuffers(2)
 
         # Vertices VBO
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_vertices)
@@ -225,10 +273,6 @@ class OpenGLViewport(QOpenGLWidget):
         glBindBuffer(GL_ARRAY_BUFFER, self._vbo_normals)
         glBufferData(GL_ARRAY_BUFFER, normals.nbytes, normals, GL_STATIC_DRAW)
 
-        # Faces Element Buffer
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self._vbo_faces)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, faces.nbytes, faces, GL_STATIC_DRAW)
-
         # Edge lines VBO
         if self.num_edge_vertices > 0:
             self._vbo_edges = glGenBuffers(1)
@@ -236,7 +280,6 @@ class OpenGLViewport(QOpenGLWidget):
             glBufferData(GL_ARRAY_BUFFER, edge_vertices.nbytes, edge_vertices, GL_STATIC_DRAW)
 
         glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
         # Compile states into a Vertex Array Object (VAO)
         self._vao = glGenVertexArrays(1)
@@ -252,13 +295,9 @@ class OpenGLViewport(QOpenGLWidget):
         glNormalPointer(GL_FLOAT, 0, None)
         glEnableClientState(GL_NORMAL_ARRAY)
 
-        # Bind face indices in VAO
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self._vbo_faces)
-
         # Unbind VAO & Buffers
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
         # Auto-center camera around the new mesh
         self.fit_object_to_view('fit')
@@ -334,10 +373,9 @@ class OpenGLViewport(QOpenGLWidget):
 
         buffers_to_delete = []
         if self._vbo_vertices is not None:
-            buffers_to_delete.extend([self._vbo_vertices, self._vbo_normals, self._vbo_faces])
+            buffers_to_delete.extend([self._vbo_vertices, self._vbo_normals])
             self._vbo_vertices = None
             self._vbo_normals = None
-            self._vbo_faces = None
 
         if self._vbo_edges is not None:
             buffers_to_delete.append(self._vbo_edges)
@@ -506,7 +544,7 @@ class OpenGLViewport(QOpenGLWidget):
                 glPolygonOffset(1.0, 1.0)
 
             glBindVertexArray(self._vao)
-            glDrawElements(GL_TRIANGLES, self.num_indices, GL_UNSIGNED_INT, None)
+            glDrawArrays(GL_TRIANGLES, 0, self.num_indices)
             glBindVertexArray(0)
 
             if self.render_mode == 'shaded_with_edges':
