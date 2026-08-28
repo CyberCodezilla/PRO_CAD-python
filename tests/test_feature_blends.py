@@ -5,7 +5,6 @@ and graceful exception fallback / radius clamping (User Guardrail #1).
 """
 
 import pytest
-import build123d as bd
 from src.engine.cad_engine import CADEngine, Rectangle, Arc, Line
 from src.reconstruction.brep_reconstructor import BRepReconstructionWorker, HAS_BUILD123D
 
@@ -31,9 +30,12 @@ def test_2d_corner_blend_detection():
     assert chamfer_line.chamfer_dist > 0.0
 
 
-@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d/OpenCASCADE not installed")
 def test_3d_topological_fillet_execution():
     """Verify that 3D B-Rep reconstructor applies true edge fillets and chamfers"""
+    bd = pytest.importorskip("build123d", reason="build123d/OpenCASCADE not installed")
+    if not HAS_BUILD123D:
+        pytest.skip("build123d / OpenCASCADE not available")
+
     top_shapes = [
         {'type': 'rectangle', 'rect': (-50.0, -50.0, 100.0, 100.0), 'layer': 'Visible'},
         {'type': 'arc', 'center': (10.0, 10.0), 'radius': 5.0, 'start_angle': 0.0, 'end_angle': 90.0,
@@ -56,9 +58,12 @@ def test_3d_topological_fillet_execution():
     assert len(step_bytes) > 100
 
 
-@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d/OpenCASCADE not installed")
 def test_fillet_oversize_graceful_fallback():
     """Verify that over-sized fillet radius clamps or safely falls back without crashing (Guardrail #1)"""
+    bd = pytest.importorskip("build123d", reason="build123d/OpenCASCADE not installed")
+    if not HAS_BUILD123D:
+        pytest.skip("build123d / OpenCASCADE not available")
+
     top_shapes = [
         {'type': 'rectangle', 'rect': (-10.0, -10.0, 20.0, 20.0), 'layer': 'Visible'},
         # Fillet radius 50.0 exceeds physical geometry of 20x20 box

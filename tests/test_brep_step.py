@@ -9,9 +9,12 @@ from src.reconstruction.brep_reconstructor import BRepReconstructionWorker, HAS_
 from src.utils.step_exporter import StepExporter
 
 
-@pytest.mark.skipif(not HAS_BUILD123D, reason="build123d / OpenCASCADE not installed")
 def test_brep_box_reconstruction():
     """Verify exact analytical B-Rep reconstruction of a 100x100x100 cube solid"""
+    bd = pytest.importorskip("build123d", reason="build123d / OpenCASCADE not installed")
+    if not HAS_BUILD123D:
+        pytest.skip("build123d / OpenCASCADE not available")
+
     top_shapes = [{
         'type': 'rectangle',
         'rect': (-50.0, -50.0, 100.0, 100.0),

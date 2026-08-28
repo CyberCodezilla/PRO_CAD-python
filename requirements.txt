@@ -25,6 +25,9 @@ scikit-image
 mapbox-earcut
 manifold3d
 
+# CAD Kernel & B-Rep Modeling
+build123d>=0.8.0
+
 # File I/O
 Pillow
 
