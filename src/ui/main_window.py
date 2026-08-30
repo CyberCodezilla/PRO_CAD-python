@@ -23,9 +23,12 @@ from .viewport_3d import OpenGLViewport
 from .gdt_dialog import GDTDialog
 from .section_dialog import SectionDialog
 from .assembly_panel import AssemblyPanel
+from .sheet_properties_dialog import SheetPropertiesDialog
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
 from ..engine.assembly_engine import AssemblyEngine
+from ..engine.sheet_layout_engine import SheetFormat, TitleBlockData
+from ..export.drawing_exporter import DrawingExporter
 from ..reconstruction.reconstructor import Reconstructor3D
 from ..reconstruction.brep_reconstructor import BRepReconstructionWorker, HAS_BUILD123D
 from ..utils.step_exporter import StepExporter
@@ -101,6 +104,10 @@ class MainWindow(QMainWindow):
         self.cached_iges_bytes: bytes = b""
         self.brep_worker: Optional[BRepReconstructionWorker] = None
         self.update_worker: Optional[UpdateCheckWorker] = None
+        
+        # Drawing Sheet & Title Block Metadata (ISO 5457 / ISO 7200)
+        self.sheet_format = SheetFormat.ISO_A3
+        self.title_block_data = TitleBlockData()
         
         self._init_ui()
         self._create_menus()
@@ -272,6 +279,20 @@ class MainWindow(QMainWindow):
         export_3mf_action = QAction("Export 3MF...", self)
         export_3mf_action.triggered.connect(lambda: self._export_mesh('3mf'))
         file_menu.addAction(export_3mf_action)
+
+        file_menu.addSeparator()
+
+        sheet_setup_action = QAction("Drawing Sheet &Setup (ISO 5457 / 7200)...", self)
+        sheet_setup_action.triggered.connect(self._show_sheet_setup)
+        file_menu.addAction(sheet_setup_action)
+
+        export_pdf_action = QAction("Export &1:1 Vector PDF (ISO 7200)...", self)
+        export_pdf_action.triggered.connect(self._export_pdf_drawing)
+        file_menu.addAction(export_pdf_action)
+
+        export_dxf_action = QAction("Export &2D DXF...", self)
+        export_dxf_action.triggered.connect(self._export_dxf_drawing)
+        file_menu.addAction(export_dxf_action)
 
         file_menu.addSeparator()
 
@@ -724,6 +745,53 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Export Warning", "No analytical IGES solid available. Ensure valid watertight 2D profiles are drawn.")
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"Failed to export IGES file:\n{str(e)}")
+
+    def _show_sheet_setup(self):
+        """Configure drawing sheet format and ISO 7200 title block metadata"""
+        dlg = SheetPropertiesDialog(self.sheet_format, self.title_block_data, self)
+        if dlg.exec():
+            self.sheet_format = dlg.sheet_format
+            self.title_block_data = dlg.title_block
+            self.statusBar().showMessage(f"Drawing Sheet configured: {self.sheet_format.value}")
+
+    def _export_pdf_drawing(self):
+        """Export manufacturing drawing sheet to 1:1 Vector PDF"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export 1:1 Vector PDF", "", "PDF Files (*.pdf)")
+        if not filename:
+            return
+
+        try:
+            success = DrawingExporter.export_to_pdf(
+                self.cad_engine,
+                filename,
+                sheet_format=self.sheet_format,
+                title_block=self.title_block_data
+            )
+            if success:
+                QMessageBox.information(self, "Export Success", f"Successfully exported 1:1 Vector PDF to:\n{filename}")
+            else:
+                QMessageBox.warning(self, "Export Warning", "Could not generate Vector PDF.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export PDF:\n{str(e)}")
+
+    def _export_dxf_drawing(self):
+        """Export manufacturing drawing sheet to 2D DXF"""
+        filename, _ = QFileDialog.getSaveFileName(self, "Export 2D DXF", "", "DXF Files (*.dxf)")
+        if not filename:
+            return
+
+        try:
+            success = DrawingExporter.export_to_dxf(
+                self.cad_engine,
+                filename,
+                sheet_format=self.sheet_format
+            )
+            if success:
+                QMessageBox.information(self, "Export Success", f"Successfully exported 2D DXF to:\n{filename}")
+            else:
+                QMessageBox.warning(self, "Export Warning", "DXF exporter requires 'ezdxf'. Please install ezdxf or export as Vector PDF.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export DXF:\n{str(e)}")
 
     def _vectorize_scanned_drawing(self):
         """Load and vectorize a scanned raster blueprint image into editable CAD entities"""
