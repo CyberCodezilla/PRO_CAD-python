@@ -23,6 +23,7 @@ from .viewport_3d import OpenGLViewport
 from .gdt_dialog import GDTDialog
 from .section_dialog import SectionDialog
 from .assembly_panel import AssemblyPanel
+from .cam_panel import CAMPanel
 from .sheet_properties_dialog import SheetPropertiesDialog
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
@@ -1227,6 +1228,14 @@ class MainWindow(QMainWindow):
         self.assembly_panel.part_selected.connect(self.viewport_3d.set_selected_part_id)
         self.assembly_dock.setWidget(self.assembly_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.assembly_dock)
+
+        # CAM & CNC G-Code Generator Dock
+        self.cam_dock = QDockWidget("CAM & CNC G-Code (ISO 6983)", self)
+        self.cam_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.cam_panel = CAMPanel(self.cad_engine, self)
+        self.cam_panel.toolpaths_updated.connect(self.viewport_3d.set_toolpath_segments)
+        self.cam_dock.setWidget(self.cam_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.cam_dock)
 
     def _on_explode_slider_changed(self, factor: float):
         """Update 3D viewport part positions dynamically according to disassembly trajectory vectors"""

@@ -1035,3 +1035,73 @@ class RulesEngine:
                         ))
 
         return diagnostics
+
+    # -------------------------------------------------------------------------
+    # 9. CAM & CNC MACHINING SAFETY RULES (CAM_01, CAM_02, CAM_03)
+    # -------------------------------------------------------------------------
+    def check_cam_rules(
+        self,
+        operations: List[Any],
+        stock_bounds: Optional[Tuple[float, float, float, float]] = None,
+        material: str = "6061-T6 Aluminum"
+    ) -> List[Diagnostic]:
+        """
+        Validates CAM machining operations against CNC cutting safety rules:
+        - CAM_01: Tool Overload & Spindle Stall Risk (Excessive chip load f_z)
+        - CAM_02: Rapid Traverse Workpiece Collision (G00 plunging below Z <= 0.0 inside stock)
+        - CAM_03: Tool Reach Deflection Warning (Depth > 3.0 * Tool Diameter)
+        """
+        diagnostics: List[Diagnostic] = []
+        if not operations:
+            return diagnostics
+
+        # Default stock bounds if none provided
+        s_xmin, s_ymin, s_xmax, s_ymax = stock_bounds if stock_bounds else (-1000.0, -1000.0, 1000.0, 1000.0)
+
+        for op in operations:
+            tool = getattr(op, 'tool', None)
+            if not tool:
+                continue
+
+            # CAM_01: Chip load evaluation
+            fz = getattr(op, 'feed_xy', 1000.0) / max(1.0, (getattr(op, 'spindle_rpm', 8000.0) * max(1, tool.flutes)))
+            is_steel = "steel" in material.lower() or "iron" in material.lower()
+            if is_steel and fz > 0.12:
+                diagnostics.append(Diagnostic(
+                    rule_id="CAM_01",
+                    severity=DiagnosticSeverity.ERROR,
+                    title=f"Chip Load Exceeds Safe Carbide Shear Limit ({op.name})",
+                    description=f"Calculated chip load fz = {fz:.3f} mm/tooth exceeds 0.12 mm/tooth safety limit for {material}.",
+                    suggestion="Reduce feed rate or increase spindle speed to prevent tool breakage."
+                ))
+
+            # CAM_03: Tool Aspect Deflection
+            target_depth = getattr(op, 'target_depth', 0.0)
+            if target_depth > 3.0 * tool.diameter:
+                aspect_ratio = target_depth / max(1.0, tool.diameter)
+                diagnostics.append(Diagnostic(
+                    rule_id="CAM_03",
+                    severity=DiagnosticSeverity.WARNING,
+                    title=f"Tool Aspect Deflection: Excessive Tool Stickout Causes Chatter ({op.name})",
+                    description=f"Feature depth ({target_depth:.1f} mm) is {aspect_ratio:.1f}x tool diameter (Ø{tool.diameter:.1f} mm).",
+                    suggestion="Use extended shank tooling or reduce axial stepdown (a_p) to minimize deflection."
+                ))
+
+            # CAM_02: Rapid Collision Check (G00 with Z <= 0.0 inside stock)
+            segments = getattr(op, 'segments', [])
+            for seg in segments:
+                if getattr(seg, 'g_code', '') == "G00" or getattr(seg, 'is_rapid', False):
+                    x, y, z = getattr(seg, 'end_pt', (0.0, 0.0, 10.0))
+                    if z <= 0.0:
+                        # Check inside stock bounds
+                        if s_xmin <= x <= s_xmax and s_ymin <= y <= s_ymax:
+                            diagnostics.append(Diagnostic(
+                                rule_id="CAM_02",
+                                severity=DiagnosticSeverity.CRITICAL if hasattr(DiagnosticSeverity, 'CRITICAL') else DiagnosticSeverity.ERROR,
+                                title=f"Fatal Crash Hazard: G00 Rapid Move Through Solid Stock ({op.name})",
+                                description=f"G00 rapid motion targets ({x:.1f}, {y:.1f}, Z={z:.1f} mm) below the stock top plane (Z=0.0).",
+                                suggestion="Ensure rapid traverse (G00) only occurs at Z >= Z_retract (+2.0 mm)."
+                            ))
+                            break
+
+        return diagnostics

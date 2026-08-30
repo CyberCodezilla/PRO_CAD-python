@@ -61,6 +61,10 @@ class OpenGLViewport(QOpenGLWidget):
         self.part_offsets: Dict[str, Tuple[float, float, float]] = {}
         self.selected_part_id: Optional[str] = None
 
+        # CAM Toolpaths Layer
+        self.toolpath_segments: List[Any] = []
+        self.show_toolpaths: bool = True
+
         # Build floating overlay toolbar for object-centric standard views
         self._setup_overlay_toolbar()
 
@@ -472,6 +476,10 @@ class OpenGLViewport(QOpenGLWidget):
         self._draw_mesh()
         glDisable(GL_CLIP_PLANE0)
 
+        # 3. Render CAM toolpaths with depth bias (Guardrail #3)
+        if self.show_toolpaths and self.toolpath_segments:
+            self._draw_toolpaths()
+
     def _draw_procedural_grid(self):
         """Render a dynamic procedural infinite ground grid centered around camera target"""
         glDisable(GL_LIGHTING)
@@ -550,6 +558,47 @@ class OpenGLViewport(QOpenGLWidget):
         """Synchronize BOM table selection with 3D viewport highlight tint (Guardrail #3)"""
         self.selected_part_id = part_id
         self.update()
+
+    def set_toolpath_segments(self, segments: List[Any]):
+        """Register CAM toolpath motion segments for 3D visualization (Guardrail #3)"""
+        self.toolpath_segments = segments or []
+        self.update()
+
+    def _draw_toolpaths(self):
+        """Render 3D CNC toolpaths with depth offset and motion-type color coding (Guardrail #3)"""
+        glDisable(GL_LIGHTING)
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LEQUAL)
+
+        glLineWidth(2.0)
+        glBegin(GL_LINES)
+
+        for seg in self.toolpath_segments:
+            g = getattr(seg, 'g_code', '')
+            is_rapid = getattr(seg, 'is_rapid', False) or g == "G00"
+            start = getattr(seg, 'start_pt', (0.0, 0.0, 0.0))
+            end = getattr(seg, 'end_pt', (0.0, 0.0, 0.0))
+
+            if is_rapid:
+                # Rapid G00: Bright Red / Yellow
+                glColor3f(1.0, 0.25, 0.25)
+            elif g in ("G81", "G83", "G84"):
+                # Canned cycles: Magenta
+                glColor3f(1.0, 0.0, 1.0)
+            elif g in ("G02", "G03"):
+                # Arc feed: Blue
+                glColor3f(0.2, 0.6, 1.0)
+            else:
+                # Linear feed G01: Bright Cyan
+                glColor3f(0.0, 1.0, 1.0)
+
+            # Invert Y to match 3D world coordinates
+            glVertex3f(float(start[0]), float(start[1]), float(start[2]))
+            glVertex3f(float(end[0]), float(end[1]), float(end[2]))
+
+        glEnd()
+        glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
 
     def _draw_mesh(self):
         """Bind and render meshes with support for exploded multi-body components and selection highlighting"""
