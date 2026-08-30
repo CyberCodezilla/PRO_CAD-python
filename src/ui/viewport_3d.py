@@ -54,8 +54,12 @@ class OpenGLViewport(QOpenGLWidget):
         self.section_axis = 'X'
         self.section_pos = 0.0
 
-        # Current mesh
+        # Current mesh and Multi-Part Assembly meshes
         self.mesh: Optional[trimesh.Trimesh] = None
+        self.part_meshes: Dict[str, trimesh.Trimesh] = {}
+        self.part_colors: Dict[str, Tuple[float, float, float, float]] = {}
+        self.part_offsets: Dict[str, Tuple[float, float, float]] = {}
+        self.selected_part_id: Optional[str] = None
 
         # Build floating overlay toolbar for object-centric standard views
         self._setup_overlay_toolbar()
@@ -523,9 +527,66 @@ class OpenGLViewport(QOpenGLWidget):
 
         glEnd()
 
+    def set_assembly_meshes(
+        self,
+        part_meshes: Dict[str, trimesh.Trimesh],
+        part_colors: Optional[Dict[str, Tuple[float, float, float, float]]] = None
+    ):
+        """Register discrete part meshes and color identifiers for multi-body assembly rendering"""
+        self.part_meshes = part_meshes or {}
+        self.part_colors = part_colors or {}
+        if self.part_meshes:
+            # Combine meshes for initial camera framing
+            combined = trimesh.util.concatenate(list(self.part_meshes.values()))
+            self.set_mesh(combined)
+        self.update()
+
+    def set_part_offsets(self, offsets: Dict[str, Tuple[float, float, float]]):
+        """Set dynamic 3D translation offsets for Exploded Assembly View"""
+        self.part_offsets = offsets or {}
+        self.update()
+
+    def set_selected_part_id(self, part_id: Optional[str]):
+        """Synchronize BOM table selection with 3D viewport highlight tint (Guardrail #3)"""
+        self.selected_part_id = part_id
+        self.update()
+
     def _draw_mesh(self):
-        """Bind Vertex Array Object (VAO) to render faces and edge overlays on GPU"""
-        if self.num_indices > 0 and self._vao is not None:
+        """Bind and render meshes with support for exploded multi-body components and selection highlighting"""
+        if self.part_meshes:
+            # Multi-body assembly render pass
+            for pid, pmesh in self.part_meshes.items():
+                offset = self.part_offsets.get(pid, (0.0, 0.0, 0.0))
+                rgba = self.part_colors.get(pid, (0.7, 0.75, 0.8, 1.0))
+
+                glPushMatrix()
+                glTranslatef(float(offset[0]), float(offset[1]), float(offset[2]))
+
+                # Apply selection highlight tint if selected
+                if pid == self.selected_part_id:
+                    ambient = [0.0, 0.8, 0.9, 1.0]
+                    diffuse = [0.0, 0.9, 1.0, 1.0]
+                    glColor3f(0.0, 0.9, 1.0)
+                else:
+                    ambient = [rgba[0] * 0.5, rgba[1] * 0.5, rgba[2] * 0.5, 1.0]
+                    diffuse = [rgba[0], rgba[1], rgba[2], 1.0]
+                    glColor3f(rgba[0], rgba[1], rgba[2])
+
+                glMaterialfv(GL_FRONT, GL_AMBIENT, ambient)
+                glMaterialfv(GL_FRONT, GL_DIFFUSE, diffuse)
+
+                # Render part triangles
+                glBegin(GL_TRIANGLES)
+                for f in pmesh.faces:
+                    for v_idx in f:
+                        if len(pmesh.vertex_normals) > v_idx:
+                            glNormal3fv(pmesh.vertex_normals[v_idx])
+                        glVertex3fv(pmesh.vertices[v_idx])
+                glEnd()
+
+                glPopMatrix()
+
+        elif self.num_indices > 0 and self._vao is not None:
             ambient = [0.35, 0.35, 0.35, 1.0]
             diffuse = [0.69, 0.69, 0.69, 1.0]
             specular = [0.4, 0.4, 0.4, 1.0]

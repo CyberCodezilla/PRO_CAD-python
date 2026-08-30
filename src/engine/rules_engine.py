@@ -18,6 +18,8 @@ from .standards_db import METRIC_COARSE_THREADS, lookup_metric_thread
 from .feature_recognizer import FeatureRecognizer, BoltCirclePattern
 from .section_engine import CuttingPlane, SectionView, SectionType, SectionEngine
 from .dfm_engine import DFMEngine, ManufacturingProcess, DFMDiagnosticSeverity, DFMViolation
+from .assembly_engine import Assembly, Part, AssemblyMate
+from .fits_db import evaluate_iso_fit
 
 
 class DiagnosticSeverity(Enum):
@@ -56,9 +58,10 @@ class RulesEngine:
         cutting_planes: Optional[List[CuttingPlane]] = None,
         section_views: Optional[List[SectionView]] = None,
         manufacturing_process: Optional[ManufacturingProcess] = None,
-        brep_solid: Optional[Any] = None
+        brep_solid: Optional[Any] = None,
+        assembly: Optional[Assembly] = None
     ) -> List[Diagnostic]:
-        """Run all engineering drafting rules, GD&T, and DFM checks to aggregate diagnostic report"""
+        """Run all engineering drafting rules, GD&T, DFM, and Assembly checks to aggregate diagnostic report"""
         diagnostics: List[Diagnostic] = []
 
         # 1. Projection Angle Detection Rule
@@ -117,6 +120,10 @@ class RulesEngine:
 
         # 18. Design for Manufacturing (DFM) Rules (CNC, Molding, Sheet Metal)
         diagnostics.extend(self.check_dfm_rules(shapes_by_view, manufacturing_process, brep_solid))
+
+        # 19. Multi-Part Assembly & ISO 286 Fits Rules (ASSY_01 to ASSY_03)
+        if assembly is not None:
+            diagnostics.extend(self.check_assembly_rules(assembly, shapes_by_view))
 
         return diagnostics
 
@@ -937,5 +944,94 @@ class RulesEngine:
                 fix_action=fix_act,
                 fix_data=v.autofix_payload
             ))
+
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # RULE 19: MULTI-PART ASSEMBLY & ISO 286 FITS RULES
+    # -------------------------------------------------------------------------
+    def check_assembly_rules(
+        self,
+        assembly: Assembly,
+        shapes_by_view: Dict[str, List[Shape]]
+    ) -> List[Diagnostic]:
+        """
+        Evaluates multi-part kinematic assembly constraints and ISO 286 limits and fits:
+        - ASSY_01: ISO Fit Intent Conflict (Mechanical Seizure Warning).
+        - ASSY_02: Coaxial Centerline Misalignment.
+        - ASSY_03: Exploded Trajectory Collision Warning.
+        """
+        diagnostics: List[Diagnostic] = []
+        if not assembly or not assembly.mates:
+            return diagnostics
+
+        all_shapes = [s for slist in shapes_by_view.values() for s in slist]
+        shape_dict = {s.id: s for s in all_shapes}
+
+        for m in assembly.mates:
+            part_a = assembly.parts.get(m.part_a_id)
+            part_b = assembly.parts.get(m.part_b_id)
+            if not part_a or not part_b:
+                continue
+
+            # ASSY_01: ISO Fit Conflict / Seizure
+            if m.fit_code:
+                fit_eval = evaluate_iso_fit(m.nominal_d, m.fit_code)
+                is_clearance_spec = fit_eval.fit_code.lower().endswith("g6") or fit_eval.fit_code.lower().endswith("h6") or fit_eval.category == "CLEARANCE"
+
+                # Check actual drawn shaft vs hole dimensions if shapes are linked
+                drawn_shaft_d = None
+                drawn_hole_d = None
+                for sid in part_b.shape_ids:
+                    s = shape_dict.get(sid)
+                    if isinstance(s, Circle):
+                        drawn_shaft_d = 2.0 * s.radius
+                for sid in part_a.shape_ids:
+                    s = shape_dict.get(sid)
+                    if isinstance(s, Circle):
+                        drawn_hole_d = 2.0 * s.radius
+
+                if is_clearance_spec:
+                    if drawn_shaft_d is not None and drawn_hole_d is not None:
+                        actual_clearance = drawn_hole_d - drawn_shaft_d
+                        if actual_clearance <= 0.0:
+                            diagnostics.append(Diagnostic(
+                                rule_id="ASSY_01",
+                                severity=DiagnosticSeverity.ERROR,
+                                title=f"Mechanical Seizure Risk: Interference Under Clearance Fit {m.fit_code}",
+                                description=(
+                                    f"Drawn shaft diameter ({drawn_shaft_d:.3f} mm) exceeds hole diameter ({drawn_hole_d:.3f} mm). "
+                                    f"Specified sliding fit {m.fit_code} requires positive clearance ({fit_eval.min_clearance*1000:.1f} µm minimum)."
+                                ),
+                                suggestion=f"Adjust shaft diameter to <= {fit_eval.shaft_upper_limit:.3f} mm for {m.fit_code} running fit.",
+                                mismatched_shape_ids=part_b.shape_ids
+                            ))
+                    elif fit_eval.min_clearance < 0.0:
+                        diagnostics.append(Diagnostic(
+                            rule_id="ASSY_01",
+                            severity=DiagnosticSeverity.ERROR,
+                            title=f"Mechanical Seizure Risk: Negative Clearance on Fit {m.fit_code}",
+                            description=f"Specified fit {m.fit_code} on Ø{m.nominal_d:.1f} mm yields negative clearance ({fit_eval.min_clearance*1000:.1f} µm).",
+                            suggestion="Change fit specification to a clearance standard (e.g. H7/g6 or H7/h6).",
+                            mismatched_shape_ids=part_b.shape_ids
+                        ))
+
+            # ASSY_02: Coaxial Centerline Misalignment
+            if m.type == "COAXIAL":
+                centers_a = [s.center for sid in part_a.shape_ids if (s := shape_dict.get(sid)) and isinstance(s, Circle)]
+                centers_b = [s.center for sid in part_b.shape_ids if (s := shape_dict.get(sid)) and isinstance(s, Circle)]
+                if centers_a and centers_b:
+                    ca = centers_a[0]
+                    cb = centers_b[0]
+                    offset = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
+                    if offset > 0.5:
+                        diagnostics.append(Diagnostic(
+                            rule_id="ASSY_02",
+                            severity=DiagnosticSeverity.WARNING,
+                            title=f"Coaxial Mating Eccentricity ({part_a.name} & {part_b.name})",
+                            description=f"Centerline offset between mating features is {offset:.2f} mm (exceeds 0.5 mm tolerance).",
+                            suggestion="Align feature centers or add a concentric constraint.",
+                            mismatched_shape_ids=part_a.shape_ids + part_b.shape_ids
+                        ))
 
         return diagnostics

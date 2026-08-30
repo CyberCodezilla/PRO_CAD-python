@@ -22,8 +22,10 @@ from .toolbar import DrawingToolbar
 from .viewport_3d import OpenGLViewport
 from .gdt_dialog import GDTDialog
 from .section_dialog import SectionDialog
+from .assembly_panel import AssemblyPanel
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
+from ..engine.assembly_engine import AssemblyEngine
 from ..reconstruction.reconstructor import Reconstructor3D
 from ..reconstruction.brep_reconstructor import BRepReconstructionWorker, HAS_BUILD123D
 from ..utils.step_exporter import StepExporter
@@ -1149,6 +1151,21 @@ class MainWindow(QMainWindow):
         self.doctor_dock.setWidget(doctor_container)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.doctor_dock)
 
+        # Multi-Part Assembly & BOM Dock
+        self.assembly_dock = QDockWidget("Multi-Part Assembly & BOM (ISO 7200)", self)
+        self.assembly_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.assembly_panel = AssemblyPanel(self.cad_engine, self)
+        self.assembly_panel.explode_changed.connect(self._on_explode_slider_changed)
+        self.assembly_panel.part_selected.connect(self.viewport_3d.set_selected_part_id)
+        self.assembly_dock.setWidget(self.assembly_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.assembly_dock)
+
+    def _on_explode_slider_changed(self, factor: float):
+        """Update 3D viewport part positions dynamically according to disassembly trajectory vectors"""
+        assy = self.cad_engine.get_assembly()
+        offsets = AssemblyEngine.compute_exploded_trajectories(assy, factor, shapes_by_view=self.cad_engine.shapes)
+        self.viewport_3d.set_part_offsets(offsets)
+
     def _run_diagnostics_and_update_doctor(self) -> Tuple[bool, str]:
         """Run RulesEngine and populate CAD Doctor dock list"""
         self.doctor_tree.clear()
@@ -1158,7 +1175,8 @@ class MainWindow(QMainWindow):
             self.cad_engine.get_datums(),
             self.cad_engine.get_feature_control_frames(),
             self.cad_engine.get_cutting_planes(),
-            self.cad_engine.get_section_views()
+            self.cad_engine.get_section_views(),
+            assembly=self.cad_engine.get_assembly()
         )
         
         has_error = False

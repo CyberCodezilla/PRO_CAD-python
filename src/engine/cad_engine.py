@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Any, Optional
 from .constraint_solver import Constraint, ConstraintType, ConstraintSolver2D
 from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, MaterialModifier
 from .section_engine import CuttingPlane, SectionView, SectionType
+from .assembly_engine import Assembly, Part, AssemblyMate
 
 class Shape:
     """Base class for all drawing shapes"""
@@ -270,6 +271,7 @@ class CADEngine:
         self.feature_control_frames: Dict[str, FeatureControlFrame] = {}
         self.cutting_planes: Dict[str, CuttingPlane] = {}
         self.section_views: Dict[str, SectionView] = {}
+        self.assembly: Assembly = Assembly()
         self.active_tool: str = 'select'
         self.active_layer: str = 'Visible'  # 'Visible', 'Hidden', 'Construction'
         self.active_view_mode: str = 'auto'  # 'auto', 'top', 'front', 'left_side', 'right_side'
@@ -635,6 +637,30 @@ class CADEngine:
     def get_section_views(self) -> List[SectionView]:
         """Get all registered section views"""
         return list(self.section_views.values())
+
+    def get_assembly(self) -> Assembly:
+        """Get project multi-part assembly definition"""
+        return self.assembly
+
+    def add_part(self, part: Part):
+        """Add or update a discrete part in the assembly"""
+        self.assembly.parts[part.part_id] = part
+        self._save_state(f"Add Part {part.name}")
+
+    def remove_part(self, part_id: str) -> bool:
+        """Remove a part and associated mates from the assembly"""
+        if part_id in self.assembly.parts:
+            self.assembly.parts.pop(part_id)
+            self.assembly.mates = [m for m in self.assembly.mates if m.part_a_id != part_id and m.part_b_id != part_id]
+            self._save_state(f"Remove Part {part_id}")
+            return True
+        return False
+
+    def add_mate(self, mate: AssemblyMate):
+        """Add a kinematic mating joint between two parts"""
+        self.assembly.mates = [m for m in self.assembly.mates if m.mate_id != mate.mate_id]
+        self.assembly.mates.append(mate)
+        self._save_state(f"Add Mate {mate.type}")
         
     def undo(self) -> Tuple[bool, str]:
         """Undo last action"""
@@ -745,7 +771,32 @@ class CADEngine:
                 'hatch_angle': sv.hatch_angle,
                 'hatch_pitch': sv.hatch_pitch,
                 'rib_exclusion_ids': sv.rib_exclusion_ids
-            } for k, sv in self.section_views.items()}
+            } for k, sv in self.section_views.items()},
+            'assembly': {
+                'name': self.assembly.name,
+                'revision': self.assembly.revision,
+                'parts': {pid: {
+                    'part_id': p.part_id,
+                    'name': p.name,
+                    'material': p.material,
+                    'qty': p.qty,
+                    'color_rgba': list(p.color_rgba),
+                    'shape_ids': p.shape_ids,
+                    'is_anchor': p.is_anchor,
+                    'nominal_position': list(p.nominal_position),
+                    'extent_3d': list(p.extent_3d)
+                } for pid, p in self.assembly.parts.items()},
+                'mates': [{
+                    'mate_id': m.mate_id,
+                    'type': m.type,
+                    'part_a_id': m.part_a_id,
+                    'part_b_id': m.part_b_id,
+                    'axis': m.axis,
+                    'vector': list(m.vector),
+                    'nominal_d': m.nominal_d,
+                    'fit_code': m.fit_code
+                } for m in self.assembly.mates]
+            }
         }
         
         self.history.append((description, state))
@@ -756,7 +807,7 @@ class CADEngine:
             self.history_index -= 1
             
     def _load_state_from_history(self):
-        """Restore shapes, regions, constraints, datums, FCFs, and section planes from history state"""
+        """Restore shapes, regions, constraints, datums, FCFs, section planes, and assembly from history state"""
         description, state = self.history[self.history_index]
         if 'shapes' in state:
             self.shapes = {v: [Shape.from_dict(s) for s in state['shapes'][v]] for v in state['shapes']}
@@ -794,6 +845,36 @@ class CADEngine:
                     hatch_pitch=svd.get('hatch_pitch', 3.0),
                     rib_exclusion_ids=svd.get('rib_exclusion_ids', [])
                 )
+
+            # Load assembly
+            assy_data = state.get('assembly', {})
+            self.assembly = Assembly(
+                name=assy_data.get('name', 'Main Assembly'),
+                revision=assy_data.get('revision', 'A')
+            )
+            for pid, pd in assy_data.get('parts', {}).items():
+                self.assembly.parts[pid] = Part(
+                    part_id=pd['part_id'],
+                    name=pd.get('name', 'Part'),
+                    material=pd.get('material', 'Steel'),
+                    qty=pd.get('qty', 1),
+                    color_rgba=tuple(pd.get('color_rgba', (0.7, 0.75, 0.8, 1.0))),
+                    shape_ids=pd.get('shape_ids', []),
+                    is_anchor=pd.get('is_anchor', False),
+                    nominal_position=tuple(pd.get('nominal_position', (0.0, 0.0, 0.0))),
+                    extent_3d=tuple(pd.get('extent_3d', (50.0, 50.0, 50.0)))
+                )
+            for md in assy_data.get('mates', []):
+                self.assembly.mates.append(AssemblyMate(
+                    mate_id=md['mate_id'],
+                    type=md.get('type', 'COAXIAL'),
+                    part_a_id=md['part_a_id'],
+                    part_b_id=md['part_b_id'],
+                    axis=md.get('axis', 'Z'),
+                    vector=tuple(md.get('vector', (0.0, 0.0, 1.0))),
+                    nominal_d=md.get('nominal_d', 20.0),
+                    fit_code=md.get('fit_code')
+                ))
 
             self.constraints = []
             for cd in state.get('constraints', []):
