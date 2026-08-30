@@ -21,6 +21,7 @@ from .canvas import DrawingCanvas
 from .toolbar import DrawingToolbar
 from .viewport_3d import OpenGLViewport
 from .gdt_dialog import GDTDialog
+from .section_dialog import SectionDialog
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
 from ..reconstruction.reconstructor import Reconstructor3D
@@ -377,6 +378,13 @@ class MainWindow(QMainWindow):
         stack_action.setShortcut(QKeySequence("Shift+T"))
         stack_action.triggered.connect(lambda: self._open_gdt_dialog(tab_index=2))
         gdt_menu.addAction(stack_action)
+
+        gdt_menu.addSeparator()
+
+        section_action = QAction("Add &Cutting Plane (Section A—A)...", self)
+        section_action.setShortcut(QKeySequence("Shift+S"))
+        section_action.triggered.connect(self._open_section_dialog)
+        gdt_menu.addAction(section_action)
 
         # Help Menu
         help_menu = menubar.addMenu("&Help")
@@ -826,6 +834,16 @@ class MainWindow(QMainWindow):
             self._trigger_reconstruction()
             self._run_diagnostics_and_update_doctor()
             self.statusBar().showMessage("GD&T Annotations updated successfully.")
+
+    def _open_section_dialog(self):
+        """Open the ISO 128-40 Section Views and Cutting-Plane authoring modal dialog"""
+        active_view = self.cad_engine.active_view_mode if self.cad_engine.active_view_mode != 'auto' else 'top'
+        dlg = SectionDialog(self.cad_engine, self, active_view=active_view)
+        if dlg.exec():
+            self._sync_all_views()
+            self._trigger_reconstruction()
+            self._run_diagnostics_and_update_doctor()
+            self.statusBar().showMessage("Section Plane and Cross-Hatching updated successfully.")
             
     def _show_help_dialog(self):
         """Display an interactive, beautifully formatted CAD User Guide"""
@@ -1138,7 +1156,9 @@ class MainWindow(QMainWindow):
             self.cad_engine.shapes,
             self.cad_engine.view_regions,
             self.cad_engine.get_datums(),
-            self.cad_engine.get_feature_control_frames()
+            self.cad_engine.get_feature_control_frames(),
+            self.cad_engine.get_cutting_planes(),
+            self.cad_engine.get_section_views()
         )
         
         has_error = False

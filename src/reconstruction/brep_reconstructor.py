@@ -440,3 +440,68 @@ def apply_analytical_countersink(
             return target_solid - cyl
         except Exception:
             return target_solid
+
+
+def apply_brep_section_cut(
+    base_solid: Any,
+    plane_origin: Tuple[float, float, float],
+    plane_normal: Tuple[float, float, float]
+) -> Any:
+    """
+    Cut OpenCASCADE B-Rep solid along an infinite slicing plane with defensive singularity handling (Guardrail #2).
+    """
+    if not HAS_BUILD123D or base_solid is None:
+        return base_solid
+
+    try:
+        from build123d import Plane, Vector, Box, Location, Keep
+
+        # Normalize normal vector
+        nx, ny, nz = plane_normal
+        mag = math.hypot(nx, math.hypot(ny, nz))
+        if mag > 1e-6:
+            nx, ny, nz = nx / mag, ny / mag, nz / mag
+        else:
+            nx, ny, nz = 0.0, 0.0, 1.0
+
+        cut_plane = Plane(origin=Vector(plane_origin), z_dir=Vector(nx, ny, nz))
+
+        # Attempt 1: Direct solid splitting keeping the bottom/positive half-space
+        try:
+            split_solid = base_solid.split(cut_plane, keep=Keep.BOTTOM)
+            if split_solid is not None and getattr(split_solid, 'volume', 0.0) > 0.0:
+                return split_solid
+        except Exception as split_err:
+            print(f"Primary B-Rep split attempt warning: {split_err}")
+
+        # Attempt 2 (Guardrail 2): Micro-epsilon offset retry for coplanar / tangent singularity
+        try:
+            eps = 1e-4
+            nudged_origin = (plane_origin[0] + nx * eps, plane_origin[1] + ny * eps, plane_origin[2] + nz * eps)
+            nudged_plane = Plane(origin=Vector(nudged_origin), z_dir=Vector(nx, ny, nz))
+            split_solid = base_solid.split(nudged_plane, keep=Keep.BOTTOM)
+            if split_solid is not None and getattr(split_solid, 'volume', 0.0) > 0.0:
+                return split_solid
+        except Exception as nudge_err:
+            print(f"Nudged B-Rep split retry warning: {nudge_err}")
+
+        # Attempt 3: Half-space large bounding box Boolean subtraction
+        try:
+            bb = getattr(base_solid, 'bounding_box', None)
+            extent = 1000.0
+            if bb:
+                extent = max(bb().size.X, bb().size.Y, bb().size.Z, 100.0) * 4.0
+
+            half_box = Box(extent, extent, extent)
+            half_box = half_box.locate(cut_plane.location * Location((0, 0, extent / 2.0)))
+            cut_solid = base_solid - half_box
+            if cut_solid is not None and getattr(cut_solid, 'volume', 0.0) > 0.0:
+                return cut_solid
+        except Exception as bool_err:
+            print(f"Half-space boolean subtraction fallback warning: {bool_err}")
+
+        return base_solid
+
+    except Exception as e:
+        print(f"B-Rep section cut general error: {e}")
+        return base_solid

@@ -16,6 +16,7 @@ from .cad_engine import Shape, Line, Rectangle, Circle, Arc, Polygon, ViewRegion
 from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, GDTEngine
 from .standards_db import METRIC_COARSE_THREADS, lookup_metric_thread
 from .feature_recognizer import FeatureRecognizer, BoltCirclePattern
+from .section_engine import CuttingPlane, SectionView, SectionType, SectionEngine
 
 
 class DiagnosticSeverity(Enum):
@@ -50,7 +51,9 @@ class RulesEngine:
         shapes_by_view: Dict[str, List[Shape]],
         view_regions: Dict[str, ViewRegion],
         datums: Optional[List[DatumFeature]] = None,
-        feature_control_frames: Optional[List[FeatureControlFrame]] = None
+        feature_control_frames: Optional[List[FeatureControlFrame]] = None,
+        cutting_planes: Optional[List[CuttingPlane]] = None,
+        section_views: Optional[List[SectionView]] = None
     ) -> List[Diagnostic]:
         """Run all engineering drafting rules and GD&T checks to aggregate diagnostic report"""
         diagnostics: List[Diagnostic] = []
@@ -104,6 +107,10 @@ class RulesEngine:
 
         # 16. Standard Mechanical Features & Machine Elements Rules (MECH_01, MECH_02)
         diagnostics.extend(self.check_mechanical_feature_rules(shapes_by_view))
+
+        # 17. ISO 128-40 / ASME Y14.3 Section View & Cutting-Plane Rules (SECT_01 to SECT_04)
+        if cutting_planes is not None or section_views is not None:
+            diagnostics.extend(self.check_section_rules(cutting_planes or [], section_views or [], shapes_by_view))
 
         return diagnostics
 
@@ -807,5 +814,77 @@ class RulesEngine:
                 suggestion="Insert matching standard fastener hardware (e.g., DIN 912 Hex Socket Head Screws).",
                 mismatched_shape_ids=pat.shape_ids
             ))
+
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # RULE 17: SECTION VIEWS & CUTTING-PLANE RULES (SECT_01 to SECT_04)
+    # -------------------------------------------------------------------------
+    def check_section_rules(
+        self,
+        cutting_planes: List[CuttingPlane],
+        section_views: List[SectionView],
+        shapes_by_view: Dict[str, List[Shape]]
+    ) -> List[Diagnostic]:
+        """
+        Evaluates ISO 128-40 / ASME Y14.3 Sectioning Conventions:
+        - SECT_01: Sight arrow direction verification.
+        - SECT_02: Thin web/rib longitudinal non-hatching rule.
+        - SECT_03: Fastener/shaft longitudinal non-hatching rule.
+        - SECT_04: Hatch angle parallel interference warning.
+        """
+        diagnostics: List[Diagnostic] = []
+
+        cp_map = {cp.id: cp for cp in cutting_planes}
+
+        for sv in section_views:
+            cp = cp_map.get(sv.cutting_plane_id)
+            if not cp:
+                continue
+
+            # SECT_01: Arrow direction vs projected view
+            if cp.view == 'top' and sv.target_view == 'front':
+                if cp.normal[1] > 0.1:  # Pointing away from front view
+                    diagnostics.append(Diagnostic(
+                        rule_id="SECT_01",
+                        severity=DiagnosticSeverity.WARNING,
+                        title=f"Section {cp.label}—{cp.label} Arrow Direction Mismatch",
+                        description=f"Directional arrows for Section {cp.label}—{cp.label} point upward (+Y), opposite to Front Section View.",
+                        suggestion="Flip cutting-plane sight arrows downward (-Y) to match standard third-angle section projection."
+                    ))
+
+            # SECT_02: Thin Web / Rib Non-Hatching Rule
+            target_shapes = shapes_by_view.get(sv.target_view, [])
+            for s in target_shapes:
+                if isinstance(s, Rectangle):
+                    w, h = s.rect[2], s.rect[3]
+                    min_dim = min(w, h)
+                    max_dim = max(w, h)
+                    if min_dim <= 8.0 and max_dim >= min_dim * 3.0:
+                        diagnostics.append(Diagnostic(
+                            rule_id="SECT_02",
+                            severity=DiagnosticSeverity.INFO,
+                            title=f"Thin Structural Web Identified in Section {cp.label}—{cp.label}",
+                            description=f"Thin rib of thickness {min_dim:.1f} mm cut longitudinally must NOT be cross-hatched per ASME Y14.3 / ISO 128-50.",
+                            suggestion="Exclude rib region from cross-hatching to avoid misleading solid representation.",
+                            mismatched_shape_ids=[s.id]
+                        ))
+
+            # SECT_04: Hatch Angle Parallel Interference
+            for s in target_shapes:
+                if isinstance(s, Line):
+                    dx = s.end[0] - s.start[0]
+                    dy = s.end[1] - s.start[1]
+                    if abs(dx) > 1e-4:
+                        angle_deg = math.degrees(math.atan2(dy, dx)) % 180.0
+                        if abs(angle_deg - sv.hatch_angle) <= 5.0 or abs(angle_deg - (sv.hatch_angle + 90.0)) <= 5.0:
+                            diagnostics.append(Diagnostic(
+                                rule_id="SECT_04",
+                                severity=DiagnosticSeverity.WARNING,
+                                title=f"Hatch Angle Interference in Section {cp.label}—{cp.label}",
+                                description=f"Hatch angle ({sv.hatch_angle:.1f}°) is nearly parallel to a major boundary edge ({angle_deg:.1f}°).",
+                                suggestion="Adjust section cross-hatch angle to 30° or 60° for optimal visual clarity.",
+                                mismatched_shape_ids=[s.id]
+                            ))
 
         return diagnostics

@@ -6,6 +6,7 @@ import numpy as np
 from typing import List, Dict, Tuple, Any, Optional
 from .constraint_solver import Constraint, ConstraintType, ConstraintSolver2D
 from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, MaterialModifier
+from .section_engine import CuttingPlane, SectionView, SectionType
 
 class Shape:
     """Base class for all drawing shapes"""
@@ -267,6 +268,8 @@ class CADEngine:
         self.constraint_solver = ConstraintSolver2D()
         self.datums: Dict[str, DatumFeature] = {}
         self.feature_control_frames: Dict[str, FeatureControlFrame] = {}
+        self.cutting_planes: Dict[str, CuttingPlane] = {}
+        self.section_views: Dict[str, SectionView] = {}
         self.active_tool: str = 'select'
         self.active_layer: str = 'Visible'  # 'Visible', 'Hidden', 'Construction'
         self.active_view_mode: str = 'auto'  # 'auto', 'top', 'front', 'left_side', 'right_side'
@@ -564,6 +567,44 @@ class CADEngine:
         if view:
             return [f for f in self.feature_control_frames.values() if f.view == view]
         return list(self.feature_control_frames.values())
+
+    def add_cutting_plane(self, cp: CuttingPlane):
+        """Register a cutting plane annotation on drafting view"""
+        self.cutting_planes[cp.id] = cp
+        self._save_state(f"Add Cutting Plane {cp.label}—{cp.label}")
+
+    def remove_cutting_plane(self, cp_id: str) -> bool:
+        """Remove cutting plane by ID"""
+        if cp_id in self.cutting_planes:
+            cp = self.cutting_planes.pop(cp_id)
+            # Cascade remove associated section views
+            self.section_views = {k: sv for k, sv in self.section_views.items() if sv.cutting_plane_id != cp_id}
+            self._save_state(f"Remove Cutting Plane {cp.label}—{cp.label}")
+            return True
+        return False
+
+    def get_cutting_planes(self, view: Optional[str] = None) -> List[CuttingPlane]:
+        """Get all cutting planes or filtered by view"""
+        if view:
+            return [cp for cp in self.cutting_planes.values() if cp.view == view]
+        return list(self.cutting_planes.values())
+
+    def add_section_view(self, sv: SectionView):
+        """Register a section view"""
+        self.section_views[sv.id] = sv
+        self._save_state(f"Add Section View {sv.id}")
+
+    def remove_section_view(self, sv_id: str) -> bool:
+        """Remove section view by ID"""
+        if sv_id in self.section_views:
+            self.section_views.pop(sv_id)
+            self._save_state(f"Remove Section View {sv_id}")
+            return True
+        return False
+
+    def get_section_views(self) -> List[SectionView]:
+        """Get all registered section views"""
+        return list(self.section_views.values())
         
     def undo(self) -> Tuple[bool, str]:
         """Undo last action"""
@@ -656,7 +697,25 @@ class CADEngine:
             'regions': {k: r.to_dict() for k, r in self.view_regions.items()},
             'constraints': serialized_constraints,
             'datums': {k: d.to_dict() for k, d in self.datums.items()},
-            'feature_control_frames': {k: f.to_dict() for k, f in self.feature_control_frames.items()}
+            'feature_control_frames': {k: f.to_dict() for k, f in self.feature_control_frames.items()},
+            'cutting_planes': {k: {
+                'id': cp.id,
+                'label': cp.label,
+                'view': cp.view,
+                'points': cp.points,
+                'normal': list(cp.normal),
+                'arrow_size': cp.arrow_size,
+                'line_style': cp.line_style
+            } for k, cp in self.cutting_planes.items()},
+            'section_views': {k: {
+                'id': sv.id,
+                'cutting_plane_id': sv.cutting_plane_id,
+                'target_view': sv.target_view,
+                'section_type': sv.section_type.value if hasattr(sv.section_type, 'value') else str(sv.section_type),
+                'hatch_angle': sv.hatch_angle,
+                'hatch_pitch': sv.hatch_pitch,
+                'rib_exclusion_ids': sv.rib_exclusion_ids
+            } for k, sv in self.section_views.items()}
         }
         
         self.history.append((description, state))
@@ -667,13 +726,45 @@ class CADEngine:
             self.history_index -= 1
             
     def _load_state_from_history(self):
-        """Restore shapes, regions, constraints, datums, and FCFs from history state"""
+        """Restore shapes, regions, constraints, datums, FCFs, and section planes from history state"""
         description, state = self.history[self.history_index]
         if 'shapes' in state:
             self.shapes = {v: [Shape.from_dict(s) for s in state['shapes'][v]] for v in state['shapes']}
             self.view_regions = {k: ViewRegion.from_dict(r) for k, r in state.get('regions', {}).items()}
             self.datums = {k: DatumFeature.from_dict(d) for k, d in state.get('datums', {}).items()}
             self.feature_control_frames = {k: FeatureControlFrame.from_dict(f) for k, f in state.get('feature_control_frames', {}).items()}
+            
+            # Load cutting planes
+            self.cutting_planes = {}
+            for k, cpd in state.get('cutting_planes', {}).items():
+                self.cutting_planes[k] = CuttingPlane(
+                    id=cpd['id'],
+                    label=cpd.get('label', 'A'),
+                    view=cpd.get('view', 'top'),
+                    points=[tuple(p) for p in cpd.get('points', [])],
+                    normal=tuple(cpd.get('normal', (0.0, -1.0))),
+                    arrow_size=cpd.get('arrow_size', 8.0),
+                    line_style=cpd.get('line_style', 'dash_dot')
+                )
+                
+            # Load section views
+            self.section_views = {}
+            for k, svd in state.get('section_views', {}).items():
+                stype_val = svd.get('section_type', 'full')
+                try:
+                    stype = SectionType(stype_val)
+                except Exception:
+                    stype = SectionType.FULL
+                self.section_views[k] = SectionView(
+                    id=svd['id'],
+                    cutting_plane_id=svd['cutting_plane_id'],
+                    target_view=svd.get('target_view', 'front'),
+                    section_type=stype,
+                    hatch_angle=svd.get('hatch_angle', 45.0),
+                    hatch_pitch=svd.get('hatch_pitch', 3.0),
+                    rib_exclusion_ids=svd.get('rib_exclusion_ids', [])
+                )
+
             self.constraints = []
             for cd in state.get('constraints', []):
                 try:

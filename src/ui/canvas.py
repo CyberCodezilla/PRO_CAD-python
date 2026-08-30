@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt, QPoint, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QPolygonF, QMouseEvent, QWheelEvent, QCursor, QPainterPath, QFont
 from ..engine.cad_engine import Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, MaterialModifier, GDT_UNICODE_MAP, MODIFIER_SYMBOL_MAP
+from ..engine.section_engine import CuttingPlane, SectionView, SectionEngine
 
 class DrawingCanvas(QGraphicsView):
     """QGraphicsView widget for precision vector CAD drawing"""
@@ -279,9 +280,11 @@ class DrawingCanvas(QGraphicsView):
 
         # 4. Render Geometric Constraint Badges
         self._draw_constraint_badges()
-
         # 5. Render ASME Y14.5 Datums and Feature Control Frames
         self._draw_gdt_annotations()
+
+        # 6. Render ISO 128-40 Cutting Planes and 45° Cross-Hatching
+        self._draw_section_annotations()
             
         self.scene().update()
 
@@ -302,8 +305,7 @@ class DrawingCanvas(QGraphicsView):
             s1 = all_shapes.get(c.shape_ids[0])
             if not s1:
                 continue
-                
-            # Compute position for badge
+
             badge_pos = None
             if s1.type == 'line':
                 badge_pos = QPointF((s1.start[0] + s1.end[0]) / 2.0, (s1.start[1] + s1.end[1]) / 2.0)
@@ -341,6 +343,26 @@ class DrawingCanvas(QGraphicsView):
         for fcf in self.cad_engine.feature_control_frames.values():
             fcf_item = GDTFeatureControlFrameItem(fcf, self)
             self.scene().addItem(fcf_item)
+
+    def _draw_section_annotations(self):
+        """Render Cutting Plane lines and Cross-Hatch shading on section views"""
+        if not hasattr(self.cad_engine, 'cutting_planes'):
+            return
+
+        # Render Cutting Planes on source drafting view
+        for cp in self.cad_engine.cutting_planes.values():
+            cp_item = CuttingPlaneItem(cp, self)
+            self.scene().addItem(cp_item)
+
+        # Render 45° Cross-Hatching on section views
+        for sv in self.cad_engine.section_views.values():
+            shapes = self.cad_engine.get_shapes(sv.target_view)
+            rects = [s for s in shapes if isinstance(s, Rectangle) and s.id not in sv.rib_exclusion_ids]
+            for r in rects:
+                rx, ry, rw, rh = r.rect
+                outer = [(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)]
+                hatch_item = CrossHatchItem(outer, pitch=sv.hatch_pitch, angle_deg=sv.hatch_angle)
+                self.scene().addItem(hatch_item)
 
     def _draw_unified_projection_lines(self):
         """Draw orthographic projection alignment guidelines & 45° Miter Line"""
@@ -1819,3 +1841,104 @@ class GDTDatumSymbolItem(QGraphicsItemGroup):
             new_pos = self.pos()
             self.datum.origin = (new_pos.x(), new_pos.y())
         return super().itemChange(change, value)
+
+
+class CuttingPlaneItem(QGraphicsItemGroup):
+    """
+    ISO 128-40 / ASME Y14.3 Cutting-Plane Item:
+    - Thick dash-dot line profile (0.70 mm).
+    - Thickened terminal ends (1.0 mm).
+    - Directional sight arrows pointing perpendicular to the line in viewing direction.
+    - Identification letter tags ("A—A").
+    """
+    def __init__(self, cutting_plane: CuttingPlane, parent_canvas=None):
+        super().__init__()
+        self.cp = cutting_plane
+        self.parent_canvas = parent_canvas
+        self._build_item()
+
+    def _build_item(self):
+        pts = self.cp.points
+        if len(pts) < 2:
+            return
+
+        dash_pen = QPen(QColor('#FFD700'), 1.4, Qt.PenStyle.DashDotLine)
+        thick_end_pen = QPen(QColor('#FFD700'), 2.4, Qt.PenStyle.SolidLine)
+        arrow_brush = QBrush(QColor('#FFD700'))
+
+        # Draw main path segments
+        for i in range(len(pts) - 1):
+            p1 = pts[i]
+            p2 = pts[i + 1]
+            line = QGraphicsLineItem(p1[0], p1[1], p2[0], p2[1])
+            line.setPen(dash_pen)
+            self.addToGroup(line)
+
+        # Thickened terminal stems at ends
+        first_pt = pts[0]
+        last_pt = pts[-1]
+        nx, ny = self.cp.normal
+        mag = math.hypot(nx, ny)
+        if mag > 1e-4:
+            nx, ny = nx / mag, ny / mag
+        else:
+            nx, ny = 0.0, -1.0
+
+        arrow_len = self.cp.arrow_size
+
+        for pt in (first_pt, last_pt):
+            stem = QGraphicsLineItem(pt[0], pt[1], pt[0] + nx * arrow_len, pt[1] + ny * arrow_len)
+            stem.setPen(thick_end_pen)
+            self.addToGroup(stem)
+
+            tip_x = pt[0] + nx * (arrow_len + 4.0)
+            tip_y = pt[1] + ny * (arrow_len + 4.0)
+            px, py = -ny * 3.5, nx * 3.5
+
+            arrow_path = QPainterPath()
+            arrow_path.moveTo(tip_x, tip_y)
+            arrow_path.lineTo(tip_x - nx * 7.0 + px, tip_y - ny * 7.0 + py)
+            arrow_path.lineTo(tip_x - nx * 7.0 - px, tip_y - ny * 7.0 - py)
+            arrow_path.closeSubpath()
+
+            arrow_item = QGraphicsPathItem(arrow_path)
+            arrow_item.setPen(thick_end_pen)
+            arrow_item.setBrush(arrow_brush)
+            self.addToGroup(arrow_item)
+
+            font = QFont("Segoe UI", 11, QFont.Weight.Bold)
+            text_item = QGraphicsSimpleTextItem(self.cp.label.upper())
+            text_item.setFont(font)
+            text_item.setBrush(QBrush(QColor('#FFFFFF')))
+            text_item.setPos(tip_x + nx * 4.0 - 5.0, tip_y + ny * 4.0 - 8.0)
+            self.addToGroup(text_item)
+
+
+class CrossHatchItem(QGraphicsPathItem):
+    """
+    ISO 128-50 / DIN 201 45-degree Material Cross-Hatch Item.
+    Generates thin parallel hatch lines across a cut polygon face.
+    """
+    def __init__(self, boundary_coords: List[Tuple[float, float]], pitch: float = 3.0, angle_deg: float = 45.0, parent=None):
+        super().__init__(parent)
+        self.boundary = boundary_coords
+        self.pitch = pitch
+        self.angle_deg = angle_deg
+
+        pen = QPen(QColor('#00E5FF'), 0.8, Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        self._build_hatch_path()
+
+    def _build_hatch_path(self):
+        segments = SectionEngine.generate_hatch_lines(
+            self.boundary,
+            pitch=self.pitch,
+            angle_deg=self.angle_deg
+        )
+
+        path = QPainterPath()
+        for p1, p2 in segments:
+            path.moveTo(p1[0], p1[1])
+            path.lineTo(p2[0], p2[1])
+
+        self.setPath(path)
