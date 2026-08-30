@@ -305,8 +305,19 @@ class CADEngine:
             
         action = diagnostic.fix_action
         data = diagnostic.fix_data or {}
-        
-        if action == 'auto_scale_top_width':
+
+        if action == 'auto_fix_tap_drill':
+            target_r = data.get('target_radius')
+            shape_id = data.get('shape_id')
+            if target_r and shape_id:
+                for v in self.shapes.values():
+                    for s in v:
+                        if s.id == shape_id and isinstance(s, Circle):
+                            s.radius = float(target_r)
+                            self._save_state(f"Auto-Fix: Correct Tap Drill Radius to {target_r:.2f}mm")
+                            return True
+
+        elif action == 'auto_scale_top_width':
             target_w = data.get('target_width')
             curr_w = data.get('current_width')
             if target_w and curr_w and curr_w > 0:

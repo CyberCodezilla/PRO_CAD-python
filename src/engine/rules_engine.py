@@ -14,6 +14,8 @@ import shapely.ops as so
 
 from .cad_engine import Shape, Line, Rectangle, Circle, Arc, Polygon, ViewRegion, get_shape_centroid
 from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, GDTEngine
+from .standards_db import METRIC_COARSE_THREADS, lookup_metric_thread
+from .feature_recognizer import FeatureRecognizer, BoltCirclePattern
 
 
 class DiagnosticSeverity(Enum):
@@ -99,6 +101,9 @@ class RulesEngine:
         # 15. ASME Y14.5-2018 GD&T Rules (Datum Existence, Orthogonality, DRF, Stack-Up)
         if datums is not None or feature_control_frames is not None:
             diagnostics.extend(self.check_gdt_rules(datums or [], feature_control_frames or [], shapes_by_view))
+
+        # 16. Standard Mechanical Features & Machine Elements Rules (MECH_01, MECH_02)
+        diagnostics.extend(self.check_mechanical_feature_rules(shapes_by_view))
 
         return diagnostics
 
@@ -729,5 +734,78 @@ class RulesEngine:
                     description="True Position tolerance specified without a Primary Datum Reference Frame.",
                     suggestion="Assign at least a Primary Datum (e.g., [-A-]) to establish the coordinate origin for True Position."
                 ))
+
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # RULE 16: MECHANICAL FEATURES & HARDWARE RECOGNITION (MECH_01, MECH_02)
+    # -------------------------------------------------------------------------
+    def check_mechanical_feature_rules(self, shapes_by_view: Dict[str, List[Shape]]) -> List[Diagnostic]:
+        """
+        Evaluate semantic machine features against engineering standards:
+        - MECH_01: Standard Tap Drill Verification (flags non-standard drill size for metric threads with 1-click auto-fix)
+        - MECH_02: Bolt Circle Pattern Recognition (identifies PCD hole arrays and suggests standard fasteners)
+        """
+        diagnostics: List[Diagnostic] = []
+
+        # Check all views for tapped hole circle/arc pairs
+        for view_name, shapes in shapes_by_view.items():
+            circles = [s for s in shapes if isinstance(s, Circle)]
+            arcs = [s for s in shapes if isinstance(s, Arc)]
+
+            for arc in arcs:
+                sweep = abs(arc.end_angle - arc.start_angle)
+                if sweep < 0:
+                    sweep += 360.0
+                if not (250.0 <= sweep <= 290.0):
+                    continue
+
+                for circle in circles:
+                    dist = math.hypot(arc.center[0] - circle.center[0], arc.center[1] - circle.center[1])
+                    if dist > 0.5:
+                        continue
+
+                    d_major = 2.0 * arc.radius
+                    d_drill = 2.0 * circle.radius
+
+                    thread_match = lookup_metric_thread(d_major, tolerance=0.3)
+                    if thread_match:
+                        size_name, tdata = thread_match
+                        std_drill = tdata["tap_drill"]
+                        pitch = tdata["pitch"]
+
+                        # MECH_01: Verify tap drill size
+                        if abs(d_drill - std_drill) > 0.2:
+                            diagnostics.append(Diagnostic(
+                                rule_id="MECH_01",
+                                severity=DiagnosticSeverity.ERROR,
+                                title=f"Non-Standard Tap Drill Diameter for {size_name} Thread",
+                                description=(
+                                    f"Drawn tap drill diameter is {d_drill:.2f} mm. "
+                                    f"ISO 261 standard specifies {std_drill:.2f} mm for {size_name}x{pitch:.1f} thread."
+                                ),
+                                suggestion=f"Correct tap drill diameter to standard {std_drill:.2f} mm (radius {std_drill/2.0:.2f} mm).",
+                                mismatched_shape_ids=[circle.id, arc.id],
+                                fix_action="auto_fix_tap_drill",
+                                fix_data={"target_radius": std_drill / 2.0, "shape_id": circle.id}
+                            ))
+
+        # MECH_02: PCD Bolt Circle Pattern Recognition
+        recognizer = FeatureRecognizer()
+        pcd_patterns = recognizer.detect_pcd_patterns(shapes_by_view)
+
+        for pat in pcd_patterns:
+            fastener_info = pat.matched_fastener or f"Clearance Holes ({pat.hole_size:.1f}mm)"
+            diagnostics.append(Diagnostic(
+                rule_id="MECH_02",
+                severity=DiagnosticSeverity.INFO,
+                title=f"Standard Bolt Circle Identified: {pat.count}x {fastener_info} on {pat.pcd:.0f}mm PCD",
+                description=(
+                    f"Pattern contains {pat.count} equispaced {pat.hole_size:.1f} mm holes "
+                    f"at {pat.nominal_spacing_deg:.1f}° intervals on a {pat.pcd:.1f} mm Pitch Circle Diameter."
+                ),
+                suggestion="Insert matching standard fastener hardware (e.g., DIN 912 Hex Socket Head Screws).",
+                mismatched_shape_ids=pat.shape_ids
+            ))
 
         return diagnostics

@@ -328,3 +328,115 @@ class BRepReconstructionWorker(QThread):
                 ex, ey = s['end']
                 max_val = max(max_val, abs(sx), abs(sy), abs(ex), abs(ey))
         return max_val
+
+
+def apply_analytical_counterbore(
+    target_solid: Any,
+    pos_2d: Tuple[float, float],
+    d_pass: float,
+    d_bore: float,
+    h_bore: float,
+    depth: float,
+    normal_axis: str = 'Z'
+) -> Any:
+    """
+    Apply standard counterbore hole cut onto B-Rep solid with dynamic face normal resolution (Guardrails #1 & #3).
+    """
+    if not HAS_BUILD123D:
+        return target_solid
+
+    try:
+        from build123d import CounterBoreHole, Location, Cylinder, Mode
+
+        # Guardrail 1: Explicit search for matching planar face
+        target_face = None
+        faces_attr = getattr(target_solid, 'faces', [])
+        faces_list = faces_attr() if callable(faces_attr) else (faces_attr or [])
+
+        for face in faces_list:
+            f_norm = getattr(face, 'normal_at', None)
+            if f_norm:
+                norm_vec = f_norm((0, 0))
+                if normal_axis == 'Z' and abs(getattr(norm_vec, 'Z', 0.0)) > 0.8:
+                    target_face = face
+                    break
+
+        if target_face:
+            loc = Location(target_face.location * (pos_2d[0], pos_2d[1], 0))
+            cb_tool = CounterBoreHole(
+                radius=d_pass / 2.0,
+                counter_bore_radius=d_bore / 2.0,
+                counter_bore_depth=h_bore,
+                depth=depth,
+                mode=Mode.SUBTRACT
+            )
+            return target_solid - cb_tool
+        else:
+            # Subtractive stepped cylinder cut fallback
+            c_bore = Cylinder(radius=d_bore / 2.0, height=h_bore)
+            c_pass = Cylinder(radius=d_pass / 2.0, height=depth)
+            tool = c_bore + c_pass
+            tool = tool.locate(Location((pos_2d[0], pos_2d[1], 0)))
+            return target_solid - tool
+
+    except Exception as e:
+        print(f"Analytical counterbore fallback to standard cut: {e}")
+        try:
+            from build123d import Cylinder, Location
+            cyl = Cylinder(radius=d_pass / 2.0, height=depth).locate(Location((pos_2d[0], pos_2d[1], 0)))
+            return target_solid - cyl
+        except Exception:
+            return target_solid
+
+
+def apply_analytical_countersink(
+    target_solid: Any,
+    pos_2d: Tuple[float, float],
+    d_pass: float,
+    d_sink: float,
+    angle: float,
+    depth: float,
+    normal_axis: str = 'Z'
+) -> Any:
+    """
+    Apply standard countersink hole cut with dynamic face normal resolution (Guardrails #1 & #3).
+    """
+    if not HAS_BUILD123D:
+        return target_solid
+
+    try:
+        from build123d import CounterSinkHole, Location, Cylinder, Mode
+
+        target_face = None
+        faces_attr = getattr(target_solid, 'faces', [])
+        faces_list = faces_attr() if callable(faces_attr) else (faces_attr or [])
+
+        for face in faces_list:
+            f_norm = getattr(face, 'normal_at', None)
+            if f_norm:
+                norm_vec = f_norm((0, 0))
+                if normal_axis == 'Z' and abs(getattr(norm_vec, 'Z', 0.0)) > 0.8:
+                    target_face = face
+                    break
+
+        if target_face:
+            cs_tool = CounterSinkHole(
+                radius=d_pass / 2.0,
+                counter_sink_radius=d_sink / 2.0,
+                counter_sink_angle=angle,
+                depth=depth,
+                mode=Mode.SUBTRACT
+            )
+            return target_solid - cs_tool
+        else:
+            cyl = Cylinder(radius=d_pass / 2.0, height=depth).locate(Location((pos_2d[0], pos_2d[1], 0)))
+            return target_solid - cyl
+
+    except Exception as e:
+        print(f"Analytical countersink fallback to standard cut: {e}")
+        try:
+            from build123d import Cylinder, Location
+            cyl = Cylinder(radius=d_pass / 2.0, height=depth).locate(Location((pos_2d[0], pos_2d[1], 0)))
+            return target_solid - cyl
+        except Exception:
+            return target_solid
