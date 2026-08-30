@@ -2,14 +2,20 @@
 Drawing Canvas - Vector drafting interface utilizing QGraphicsView and QGraphicsScene.
 Features infinite pan/zoom, grid/axes drawing, snapping, ortho-constrain, and projection guides.
 """
+import math
 import numpy as np
 import shapely.geometry as sg
 import shapely.ops as so
-from typing import List, Optional
-from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPolygonItem, QGraphicsItem, QGraphicsPathItem, QWidget, QHBoxLayout, QLineEdit, QInputDialog
+from typing import List, Optional, Dict, Any, Tuple
+from PyQt6.QtWidgets import (
+    QGraphicsView, QGraphicsScene, QGraphicsLineItem, QGraphicsRectItem, 
+    QGraphicsEllipseItem, QGraphicsPolygonItem, QGraphicsItem, QGraphicsPathItem, 
+    QGraphicsItemGroup, QGraphicsSimpleTextItem, QWidget, QHBoxLayout, QLineEdit, QInputDialog
+)
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRectF, pyqtSignal
-from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QPolygonF, QMouseEvent, QWheelEvent, QCursor, QPainterPath
+from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QPolygonF, QMouseEvent, QWheelEvent, QCursor, QPainterPath, QFont
 from ..engine.cad_engine import Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
+from ..engine.gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, MaterialModifier, GDT_UNICODE_MAP, MODIFIER_SYMBOL_MAP
 
 class DrawingCanvas(QGraphicsView):
     """QGraphicsView widget for precision vector CAD drawing"""
@@ -273,6 +279,9 @@ class DrawingCanvas(QGraphicsView):
 
         # 4. Render Geometric Constraint Badges
         self._draw_constraint_badges()
+
+        # 5. Render ASME Y14.5 Datums and Feature Control Frames
+        self._draw_gdt_annotations()
             
         self.scene().update()
 
@@ -319,6 +328,19 @@ class DrawingCanvas(QGraphicsView):
                 b_font.setBold(True)
                 badge.setFont(b_font)
                 badge.setPos(badge_pos.x() - 8, badge_pos.y() - 14)
+
+    def _draw_gdt_annotations(self):
+        """Render Datum identifiers and Feature Control Frame annotations onto the drafting scene"""
+        if not hasattr(self.cad_engine, 'datums') or not hasattr(self.cad_engine, 'feature_control_frames'):
+            return
+
+        for datum in self.cad_engine.datums.values():
+            datum_item = GDTDatumSymbolItem(datum, self)
+            self.scene().addItem(datum_item)
+
+        for fcf in self.cad_engine.feature_control_frames.values():
+            fcf_item = GDTFeatureControlFrameItem(fcf, self)
+            self.scene().addItem(fcf_item)
 
     def _draw_unified_projection_lines(self):
         """Draw orthographic projection alignment guidelines & 45° Miter Line"""
@@ -1585,3 +1607,215 @@ class DrawingCanvas(QGraphicsView):
                 Qt.KeyboardModifier.NoModifier
             ))
         super().keyReleaseEvent(event)
+
+
+class GDTFeatureControlFrameItem(QGraphicsItemGroup):
+    """
+    ASME Y14.5-2018 Feature Control Frame (FCF) partitioned graphical item:
+    - Partitioned frame: [Symbol] | [Ø Tolerance Mod] | [Primary] | [Secondary] | [Tertiary]
+    - Dynamic Leader Arrow: Connects frame edge to leader_target on target geometry.
+    - Zoom Invariance: Uses crisp vector geometry and legible typography (Guardrail #1).
+    - Movable & Interactive: ItemIsMovable enabled, dynamically redrawing the leader line when dragged (Guardrail #3).
+    """
+    def __init__(self, fcf: FeatureControlFrame, parent_canvas=None):
+        super().__init__()
+        self.fcf = fcf
+        self.parent_canvas = parent_canvas
+        self.frame_width = 80.0
+        self.frame_height = 22.0
+        self._leader_item: Optional[QGraphicsPathItem] = None
+
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+
+        self.setPos(fcf.leader_anchor[0], fcf.leader_anchor[1])
+        self._build_item()
+
+    def _build_item(self):
+        cell_h = 22.0
+        padding = 6.0
+
+        # 1. Symbol cell
+        sym_str = GDT_UNICODE_MAP.get(self.fcf.symbol, self.fcf.symbol.value[:3].upper())
+        # 2. Value cell
+        dia_prefix = "Ø " if self.fcf.is_diameter else ""
+        mod_suffix = f" {MODIFIER_SYMBOL_MAP.get(self.fcf.modifier, '')}" if self.fcf.modifier != MaterialModifier.NONE else ""
+        val_str = f"{dia_prefix}{self.fcf.tolerance:.2f}{mod_suffix}".strip()
+        # 3. Datum cells
+        prim_str = self.fcf.primary_datum.strip().upper().strip("-") if self.fcf.primary_datum else ""
+        sec_str = self.fcf.secondary_datum.strip().upper().strip("-") if self.fcf.secondary_datum else ""
+        tert_str = self.fcf.tertiary_datum.strip().upper().strip("-") if self.fcf.tertiary_datum else ""
+
+        cells = [sym_str, val_str]
+        if prim_str:
+            cells.append(prim_str)
+        if sec_str:
+            cells.append(sec_str)
+        if tert_str:
+            cells.append(tert_str)
+
+        font = QFont("Segoe UI Symbol", 10, QFont.Weight.Bold)
+        font.setStyleHint(QFont.StyleHint.SansSerif)
+
+        # Calculate cell widths
+        widths = []
+        for text in cells:
+            w = max(24.0, len(text) * 8.5 + padding * 2)
+            widths.append(w)
+
+        total_w = sum(widths)
+        self.frame_width = total_w
+        self.frame_height = cell_h
+
+        # Frame Background & Border
+        border_pen = QPen(QColor('#00E5FF'), 1.5, Qt.PenStyle.SolidLine)
+        bg_brush = QBrush(QColor('#171D22'))
+
+        frame_rect = QGraphicsRectItem(0, 0, total_w, cell_h)
+        frame_rect.setPen(border_pen)
+        frame_rect.setBrush(bg_brush)
+        self.addToGroup(frame_rect)
+
+        # Draw vertical partition lines and text
+        cur_x = 0.0
+        for i, (text, w) in enumerate(zip(cells, widths)):
+            if i > 0:
+                div_line = QGraphicsLineItem(cur_x, 0, cur_x, cell_h)
+                div_line.setPen(border_pen)
+                self.addToGroup(div_line)
+
+            text_item = QGraphicsSimpleTextItem(text)
+            text_item.setFont(font)
+            text_item.setBrush(QBrush(QColor('#FFFFFF')))
+            tb = text_item.boundingRect()
+            tx = cur_x + (w - tb.width()) / 2.0
+            ty = (cell_h - tb.height()) / 2.0
+            text_item.setPos(tx, ty)
+            self.addToGroup(text_item)
+            cur_x += w
+
+        self._update_leader_line()
+
+    def _update_leader_line(self):
+        if self._leader_item:
+            self.removeFromGroup(self._leader_item)
+            if self.scene():
+                self.scene().removeItem(self._leader_item)
+            self._leader_item = None
+
+        target = QPointF(self.fcf.leader_target[0], self.fcf.leader_target[1])
+        my_pos = self.pos()
+
+        dx = target.x() - my_pos.x()
+        dy = target.y() - my_pos.y()
+        if math.hypot(dx, dy) < 2.0:
+            return
+
+        if target.x() < my_pos.x():
+            start_pt = QPointF(0, self.frame_height / 2.0)
+            elbow_x = -8.0
+        else:
+            start_pt = QPointF(self.frame_width, self.frame_height / 2.0)
+            elbow_x = self.frame_width + 8.0
+
+        local_target = target - my_pos
+        path = QPainterPath()
+        path.moveTo(start_pt)
+        path.lineTo(elbow_x, start_pt.y())
+        path.lineTo(local_target)
+
+        # Draw arrowhead pointing into target
+        arrow_len = 8.0
+        v = local_target - QPointF(elbow_x, start_pt.y())
+        vl = math.hypot(v.x(), v.y())
+        if vl > 1e-3:
+            u = v / vl
+            n = QPointF(-u.y(), u.x())
+            p1 = local_target
+            p2 = local_target - u * arrow_len + n * (arrow_len * 0.4)
+            p3 = local_target - u * arrow_len - n * (arrow_len * 0.4)
+            path.moveTo(p1)
+            path.lineTo(p2)
+            path.lineTo(p3)
+            path.closeSubpath()
+
+        pen = QPen(QColor('#00E5FF'), 1.2, Qt.PenStyle.SolidLine)
+        brush = QBrush(QColor('#00E5FF'))
+        self._leader_item = QGraphicsPathItem(path)
+        self._leader_item.setPen(pen)
+        self._leader_item.setBrush(brush)
+        self.addToGroup(self._leader_item)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            new_pos = self.pos()
+            self.fcf.leader_anchor = (new_pos.x(), new_pos.y())
+            self._update_leader_line()
+        return super().itemChange(change, value)
+
+
+class GDTDatumSymbolItem(QGraphicsItemGroup):
+    """
+    ASME Y14.5 Datum Feature Identifier Item:
+    - Filled triangular base on the datum surface
+    - Stem connecting triangle to boxed datum tag [-A-]
+    - Zoom Invariance and high contrast rendering (Guardrail #1).
+    """
+    def __init__(self, datum: DatumFeature, parent_canvas=None):
+        super().__init__()
+        self.datum = datum
+        self.parent_canvas = parent_canvas
+
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+
+        self.setPos(datum.origin[0], datum.origin[1])
+        self._build_item()
+
+    def _build_item(self):
+        box_size = 20.0
+        stem_len = 14.0
+        tri_size = 8.0
+
+        pen = QPen(QColor('#00E5FF'), 1.5, Qt.PenStyle.SolidLine)
+        bg_brush = QBrush(QColor('#171D22'))
+        tri_brush = QBrush(QColor('#00E5FF'))
+
+        # Triangle base at origin (0, 0)
+        tri_path = QPainterPath()
+        tri_path.moveTo(0, 0)
+        tri_path.lineTo(-tri_size / 2.0, -tri_size)
+        tri_path.lineTo(tri_size / 2.0, -tri_size)
+        tri_path.closeSubpath()
+        tri_item = QGraphicsPathItem(tri_path)
+        tri_item.setPen(pen)
+        tri_item.setBrush(tri_brush)
+        self.addToGroup(tri_item)
+
+        # Stem line
+        stem = QGraphicsLineItem(0, -tri_size, 0, -(tri_size + stem_len))
+        stem.setPen(pen)
+        self.addToGroup(stem)
+
+        # Boxed datum letter [-A-]
+        box_y = -(tri_size + stem_len + box_size)
+        box_rect = QGraphicsRectItem(-box_size / 2.0, box_y, box_size, box_size)
+        box_rect.setPen(pen)
+        box_rect.setBrush(bg_brush)
+        self.addToGroup(box_rect)
+
+        font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        text_item = QGraphicsSimpleTextItem(self.datum.label.upper().strip("-"))
+        text_item.setFont(font)
+        text_item.setBrush(QBrush(QColor('#FFFFFF')))
+        tb = text_item.boundingRect()
+        text_item.setPos(-tb.width() / 2.0, box_y + (box_size - tb.height()) / 2.0)
+        self.addToGroup(text_item)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            new_pos = self.pos()
+            self.datum.origin = (new_pos.x(), new_pos.y())
+        return super().itemChange(change, value)

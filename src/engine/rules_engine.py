@@ -13,6 +13,7 @@ import shapely.geometry as sg
 import shapely.ops as so
 
 from .cad_engine import Shape, Line, Rectangle, Circle, Arc, Polygon, ViewRegion, get_shape_centroid
+from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, GDTEngine
 
 
 class DiagnosticSeverity(Enum):
@@ -42,8 +43,14 @@ class RulesEngine:
         self.epsilon = epsilon  # Near-coincident vertex tolerance (mm)
         self.alignment_tolerance = alignment_tolerance  # Orthographic alignment tolerance (mm)
 
-    def evaluate_all(self, shapes_by_view: Dict[str, List[Shape]], view_regions: Dict[str, ViewRegion]) -> List[Diagnostic]:
-        """Run all 10 engineering drafting rules and aggregate diagnostic report"""
+    def evaluate_all(
+        self,
+        shapes_by_view: Dict[str, List[Shape]],
+        view_regions: Dict[str, ViewRegion],
+        datums: Optional[List[DatumFeature]] = None,
+        feature_control_frames: Optional[List[FeatureControlFrame]] = None
+    ) -> List[Diagnostic]:
+        """Run all engineering drafting rules and GD&T checks to aggregate diagnostic report"""
         diagnostics: List[Diagnostic] = []
 
         # 1. Projection Angle Detection Rule
@@ -88,6 +95,10 @@ class RulesEngine:
 
         # 14. Gated Orthographic Ambiguity Detection Rule
         diagnostics.extend(self.check_orthographic_ambiguity(shapes_by_view))
+
+        # 15. ASME Y14.5-2018 GD&T Rules (Datum Existence, Orthogonality, DRF, Stack-Up)
+        if datums is not None or feature_control_frames is not None:
+            diagnostics.extend(self.check_gdt_rules(datums or [], feature_control_frames or [], shapes_by_view))
 
         return diagnostics
 
@@ -650,3 +661,73 @@ class RulesEngine:
                 for i in range(len(pts)):
                     lines.append((pts[i], pts[(i + 1) % len(pts)], s.id))
         return lines
+
+    # -------------------------------------------------------------------------
+    # RULE 15: ASME Y14.5-2018 GD&T & DATUM REFERENCE FRAME (DRF) VALIDATION
+    # -------------------------------------------------------------------------
+    def check_gdt_rules(
+        self,
+        datums: List[DatumFeature],
+        feature_control_frames: List[FeatureControlFrame],
+        shapes_by_view: Dict[str, List[Shape]]
+    ) -> List[Diagnostic]:
+        """
+        Validate Datum Reference Frames and Feature Control Frames against ASME Y14.5-2018:
+        - GD_01: Datum Existence (every referenced datum letter must exist on the sheet)
+        - GD_02: Datum Orthogonality (Secondary must be perpendicular to Primary datum)
+        - GD_03: Basic Dimensioning (Features controlled by True Position must have basic nominals)
+        - GD_04: Over-Constrained DRF (No duplicate datum references in same frame)
+        - GD_ORPHAN: Orphan annotation attached to deleted geometry
+        """
+        diagnostics: List[Diagnostic] = []
+        all_shape_ids = {s.id for shapes in shapes_by_view.values() for s in shapes}
+        datum_map = {d.label.strip().upper().strip("-"): d for d in datums}
+
+        # Check for orphan datums
+        for d in datums:
+            if d.target_shape_id and d.target_shape_id not in all_shape_ids:
+                diagnostics.append(Diagnostic(
+                    rule_id="GD_ORPHAN",
+                    severity=DiagnosticSeverity.WARNING,
+                    title="Orphan Datum Feature",
+                    description=f"Datum [-{d.label}-] was attached to a geometry entity that was deleted or unlinked.",
+                    suggestion="Re-assign Datum [-{d.label}-] to an active entity on the sheet."
+                ))
+
+        # Check each Feature Control Frame
+        for fcf in feature_control_frames:
+            # Check for orphan FCF
+            if fcf.target_shape_id and fcf.target_shape_id not in all_shape_ids:
+                diagnostics.append(Diagnostic(
+                    rule_id="GD_ORPHAN",
+                    severity=DiagnosticSeverity.WARNING,
+                    title="Orphan Feature Control Frame",
+                    description=f"Feature Control Frame [{fcf.symbol.value}] is attached to a deleted entity.",
+                    suggestion="Re-anchor the FCF leader arrow to an active feature on the drawing sheet."
+                ))
+
+            # DRF validation (GD_01, GD_02, GD_04)
+            drf_errors = GDTEngine.validate_datum_reference_frame(fcf, datums)
+            for err in drf_errors:
+                rule_id = err.split(":")[0].strip()
+                err_msg = err.split(":", 1)[1].strip() if ":" in err else err
+                sev = DiagnosticSeverity.ERROR if "GD_01" in rule_id or "GD_04" in rule_id else DiagnosticSeverity.WARNING
+                diagnostics.append(Diagnostic(
+                    rule_id=rule_id,
+                    severity=sev,
+                    title=f"GD&T Standard Violation ({rule_id})",
+                    description=err_msg,
+                    suggestion="Update the Datum Reference Frame sequence to conform with ASME Y14.5-2018."
+                ))
+
+            # GD_03: True Position Basic Dimension Recommendation
+            if fcf.symbol == GDTSymbol.POSITION and not fcf.primary_datum:
+                diagnostics.append(Diagnostic(
+                    rule_id="GD_03",
+                    severity=DiagnosticSeverity.WARNING,
+                    title="True Position Missing DRF",
+                    description="True Position tolerance specified without a Primary Datum Reference Frame.",
+                    suggestion="Assign at least a Primary Datum (e.g., [-A-]) to establish the coordinate origin for True Position."
+                ))
+
+        return diagnostics

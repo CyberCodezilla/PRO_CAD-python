@@ -5,6 +5,7 @@ import uuid
 import numpy as np
 from typing import List, Dict, Tuple, Any, Optional
 from .constraint_solver import Constraint, ConstraintType, ConstraintSolver2D
+from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, MaterialModifier
 
 class Shape:
     """Base class for all drawing shapes"""
@@ -264,6 +265,8 @@ class CADEngine:
         self.view_regions: Dict[str, ViewRegion] = {}
         self.constraints: List[Constraint] = []
         self.constraint_solver = ConstraintSolver2D()
+        self.datums: Dict[str, DatumFeature] = {}
+        self.feature_control_frames: Dict[str, FeatureControlFrame] = {}
         self.active_tool: str = 'select'
         self.active_layer: str = 'Visible'  # 'Visible', 'Hidden', 'Construction'
         self.active_view_mode: str = 'auto'  # 'auto', 'top', 'front', 'left_side', 'right_side'
@@ -457,16 +460,31 @@ class CADEngine:
             self.shapes[target_view].append(shape)
             
     def remove_shape(self, shape_id: str, view: Optional[str] = None) -> bool:
-        """Remove a shape by ID"""
+        """Remove a shape by ID with cascade cleanup for attached Datums and FCFs (Guardrail #2)"""
         views_to_search = [view] if view and view in self.shapes else list(self.shapes.keys())
+        removed = False
         
         for v in views_to_search:
             initial_len = len(self.shapes[v])
             self.shapes[v] = [s for s in self.shapes[v] if s.id != shape_id]
             if len(self.shapes[v]) < initial_len:
-                self._save_state(f"Remove Shape from {v.capitalize()} View")
-                return True
+                removed = True
+
+        if removed:
+            self._cleanup_orphaned_gdt_references(shape_id)
+            self._save_state(f"Remove Shape {shape_id}")
+            return True
         return False
+
+    def _cleanup_orphaned_gdt_references(self, deleted_shape_id: str):
+        """Clean up or unlink any DatumFeature or FeatureControlFrame attached to a deleted shape (Guardrail #2)"""
+        for d in self.datums.values():
+            if d.target_shape_id == deleted_shape_id:
+                d.target_shape_id = None
+
+        for fcf in self.feature_control_frames.values():
+            if fcf.target_shape_id == deleted_shape_id:
+                fcf.target_shape_id = None
         
     def get_shapes(self, view: str) -> List[Shape]:
         """Get all shapes for a view"""
@@ -491,10 +509,50 @@ class CADEngine:
             'unassigned': []
         }
         self.view_regions = {}
+        self.datums = {}
+        self.feature_control_frames = {}
         self.init_default_quadrant_regions()
         self.history = []
         self.history_index = -1
         self._save_state("Clear All")
+
+    def add_datum_feature(self, datum: DatumFeature):
+        """Register a datum feature on the drafting sheet"""
+        self.datums[datum.id] = datum
+        self._save_state(f"Add Datum [-{datum.label}-]")
+
+    def remove_datum_feature(self, datum_id: str) -> bool:
+        """Remove a datum feature by ID"""
+        if datum_id in self.datums:
+            d = self.datums.pop(datum_id)
+            self._save_state(f"Remove Datum [-{d.label}-]")
+            return True
+        return False
+
+    def get_datums(self, view: Optional[str] = None) -> List[DatumFeature]:
+        """Get all datums or filtered by view"""
+        if view:
+            return [d for d in self.datums.values() if d.view == view]
+        return list(self.datums.values())
+
+    def add_feature_control_frame(self, fcf: FeatureControlFrame):
+        """Register a feature control frame annotation"""
+        self.feature_control_frames[fcf.id] = fcf
+        self._save_state(f"Add FCF [{fcf.symbol.value}]")
+
+    def remove_feature_control_frame(self, fcf_id: str) -> bool:
+        """Remove a feature control frame by ID"""
+        if fcf_id in self.feature_control_frames:
+            fcf = self.feature_control_frames.pop(fcf_id)
+            self._save_state(f"Remove FCF [{fcf.symbol.value}]")
+            return True
+        return False
+
+    def get_feature_control_frames(self, view: Optional[str] = None) -> List[FeatureControlFrame]:
+        """Get all FCFs or filtered by view"""
+        if view:
+            return [f for f in self.feature_control_frames.values() if f.view == view]
+        return list(self.feature_control_frames.values())
         
     def undo(self) -> Tuple[bool, str]:
         """Undo last action"""
@@ -585,7 +643,9 @@ class CADEngine:
         state = {
             'shapes': {v: [s.to_dict() for s in self.shapes[v]] for v in self.shapes},
             'regions': {k: r.to_dict() for k, r in self.view_regions.items()},
-            'constraints': serialized_constraints
+            'constraints': serialized_constraints,
+            'datums': {k: d.to_dict() for k, d in self.datums.items()},
+            'feature_control_frames': {k: f.to_dict() for k, f in self.feature_control_frames.items()}
         }
         
         self.history.append((description, state))
@@ -596,11 +656,13 @@ class CADEngine:
             self.history_index -= 1
             
     def _load_state_from_history(self):
-        """Restore shapes, regions, and constraints from history state"""
+        """Restore shapes, regions, constraints, datums, and FCFs from history state"""
         description, state = self.history[self.history_index]
         if 'shapes' in state:
             self.shapes = {v: [Shape.from_dict(s) for s in state['shapes'][v]] for v in state['shapes']}
             self.view_regions = {k: ViewRegion.from_dict(r) for k, r in state.get('regions', {}).items()}
+            self.datums = {k: DatumFeature.from_dict(d) for k, d in state.get('datums', {}).items()}
+            self.feature_control_frames = {k: FeatureControlFrame.from_dict(f) for k, f in state.get('feature_control_frames', {}).items()}
             self.constraints = []
             for cd in state.get('constraints', []):
                 try:
@@ -624,6 +686,8 @@ class CADEngine:
                 'side': [Shape.from_dict(s) for s in state.get('side', [])],
                 'unassigned': []
             }
+            self.datums = {}
+            self.feature_control_frames = {}
             self.constraints = []
             
     def update_associative_dimensions(self, view: str):

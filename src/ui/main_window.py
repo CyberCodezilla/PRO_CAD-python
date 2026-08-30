@@ -20,6 +20,7 @@ from PyQt6.QtGui import QAction, QKeySequence, QCursor, QColor, QBrush, QDesktop
 from .canvas import DrawingCanvas
 from .toolbar import DrawingToolbar
 from .viewport_3d import OpenGLViewport
+from .gdt_dialog import GDTDialog
 from ..engine.cad_engine import CADEngine, Shape, Line, Rectangle, Circle, Polygon, Arc, Dimension
 from ..engine.rules_engine import RulesEngine, Diagnostic, DiagnosticSeverity
 from ..reconstruction.reconstructor import Reconstructor3D
@@ -357,6 +358,26 @@ class MainWindow(QMainWindow):
         ai_autocomplete_action.triggered.connect(self._run_ai_autocomplete)
         tools_menu.addAction(ai_autocomplete_action)
         
+        # Annotations / GD&T Menu (ASME Y14.5-2018)
+        gdt_menu = menubar.addMenu("&Annotations")
+
+        fcf_action = QAction("Add &Feature Control Frame (FCF)...", self)
+        fcf_action.setShortcut(QKeySequence("Shift+G"))
+        fcf_action.triggered.connect(lambda: self._open_gdt_dialog(tab_index=0))
+        gdt_menu.addAction(fcf_action)
+
+        datum_action = QAction("Add &Datum Identifier...", self)
+        datum_action.setShortcut(QKeySequence("Shift+D"))
+        datum_action.triggered.connect(lambda: self._open_gdt_dialog(tab_index=1))
+        gdt_menu.addAction(datum_action)
+
+        gdt_menu.addSeparator()
+
+        stack_action = QAction("&Tolerance Stack-Up Analyzer...", self)
+        stack_action.setShortcut(QKeySequence("Shift+T"))
+        stack_action.triggered.connect(lambda: self._open_gdt_dialog(tab_index=2))
+        gdt_menu.addAction(stack_action)
+
         # Help Menu
         help_menu = menubar.addMenu("&Help")
         
@@ -794,6 +815,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Redo: {description}")
         else:
             self.statusBar().showMessage("Nothing to redo")
+
+    def _open_gdt_dialog(self, tab_index: int = 0):
+        """Open the ASME Y14.5 GD&T authoring modal dialog"""
+        active_view = self.cad_engine.active_view_mode if self.cad_engine.active_view_mode != 'auto' else 'front'
+        dlg = GDTDialog(self.cad_engine, self, active_view=active_view)
+        dlg.tabs.setCurrentIndex(tab_index)
+        if dlg.exec():
+            self._sync_all_views()
+            self._trigger_reconstruction()
+            self._run_diagnostics_and_update_doctor()
+            self.statusBar().showMessage("GD&T Annotations updated successfully.")
             
     def _show_help_dialog(self):
         """Display an interactive, beautifully formatted CAD User Guide"""
@@ -1102,7 +1134,12 @@ class MainWindow(QMainWindow):
     def _run_diagnostics_and_update_doctor(self) -> Tuple[bool, str]:
         """Run RulesEngine and populate CAD Doctor dock list"""
         self.doctor_tree.clear()
-        self.current_diagnostics = self.rules_engine.evaluate_all(self.cad_engine.shapes, self.cad_engine.view_regions)
+        self.current_diagnostics = self.rules_engine.evaluate_all(
+            self.cad_engine.shapes,
+            self.cad_engine.view_regions,
+            self.cad_engine.get_datums(),
+            self.cad_engine.get_feature_control_frames()
+        )
         
         has_error = False
         proj_type = '3rd_angle'
