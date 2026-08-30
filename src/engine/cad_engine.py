@@ -320,6 +320,36 @@ class CADEngine:
                             self._save_state(f"Auto-Fix: Correct Tap Drill Radius to {target_r:.2f}mm")
                             return True
 
+        elif action in ('CNC_ADD_CORNER_FILLET', 'auto_add_corner_fillet'):
+            shape_id = data.get('shape_id')
+            rec_r = data.get('recommended_radius', 1.6)
+            if shape_id:
+                for vname, slist in self.shapes.items():
+                    for idx, s in enumerate(slist):
+                        if s.id == shape_id:
+                            if isinstance(s, Rectangle):
+                                rx, ry, rw, rh = s.rect
+                                pts = [(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)]
+                                new_poly = Polygon(pts, layer=s.layer)
+                                new_poly.id = s.id
+                                setattr(new_poly, 'corner_fillet_radius', rec_r)
+                                slist[idx] = new_poly
+                            elif isinstance(s, Polygon):
+                                setattr(s, 'corner_fillet_radius', rec_r)
+                            self._save_state(f"Auto-Fix: Add CNC Corner Fillet R{rec_r:.1f}mm")
+                            return True
+
+        elif action in ('SHEET_EXPAND_BEND_RADIUS', 'auto_expand_bend_radius'):
+            shape_id = data.get('shape_id')
+            target_r = data.get('target_radius')
+            if shape_id and target_r:
+                for vname, slist in self.shapes.items():
+                    for s in slist:
+                        if s.id == shape_id and isinstance(s, Arc):
+                            s.radius = float(target_r)
+                            self._save_state(f"Auto-Fix: Expand Bend Radius to {target_r:.1f}mm")
+                            return True
+
         elif action == 'auto_scale_top_width':
             target_w = data.get('target_width')
             curr_w = data.get('current_width')

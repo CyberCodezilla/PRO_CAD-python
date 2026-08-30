@@ -17,6 +17,7 @@ from .gdt_engine import DatumFeature, FeatureControlFrame, GDTSymbol, GDTEngine
 from .standards_db import METRIC_COARSE_THREADS, lookup_metric_thread
 from .feature_recognizer import FeatureRecognizer, BoltCirclePattern
 from .section_engine import CuttingPlane, SectionView, SectionType, SectionEngine
+from .dfm_engine import DFMEngine, ManufacturingProcess, DFMDiagnosticSeverity, DFMViolation
 
 
 class DiagnosticSeverity(Enum):
@@ -53,9 +54,11 @@ class RulesEngine:
         datums: Optional[List[DatumFeature]] = None,
         feature_control_frames: Optional[List[FeatureControlFrame]] = None,
         cutting_planes: Optional[List[CuttingPlane]] = None,
-        section_views: Optional[List[SectionView]] = None
+        section_views: Optional[List[SectionView]] = None,
+        manufacturing_process: Optional[ManufacturingProcess] = None,
+        brep_solid: Optional[Any] = None
     ) -> List[Diagnostic]:
-        """Run all engineering drafting rules and GD&T checks to aggregate diagnostic report"""
+        """Run all engineering drafting rules, GD&T, and DFM checks to aggregate diagnostic report"""
         diagnostics: List[Diagnostic] = []
 
         # 1. Projection Angle Detection Rule
@@ -111,6 +114,9 @@ class RulesEngine:
         # 17. ISO 128-40 / ASME Y14.3 Section View & Cutting-Plane Rules (SECT_01 to SECT_04)
         if cutting_planes is not None or section_views is not None:
             diagnostics.extend(self.check_section_rules(cutting_planes or [], section_views or [], shapes_by_view))
+
+        # 18. Design for Manufacturing (DFM) Rules (CNC, Molding, Sheet Metal)
+        diagnostics.extend(self.check_dfm_rules(shapes_by_view, manufacturing_process, brep_solid))
 
         return diagnostics
 
@@ -886,5 +892,50 @@ class RulesEngine:
                                 suggestion="Adjust section cross-hatch angle to 30° or 60° for optimal visual clarity.",
                                 mismatched_shape_ids=[s.id]
                             ))
+
+        return diagnostics
+
+    # -------------------------------------------------------------------------
+    # RULE 18: DESIGN FOR MANUFACTURING (DFM) RULES
+    # -------------------------------------------------------------------------
+    def check_dfm_rules(
+        self,
+        shapes_by_view: Dict[str, List[Shape]],
+        process: Optional[ManufacturingProcess] = None,
+        brep_solid: Optional[Any] = None
+    ) -> List[Diagnostic]:
+        """
+        Runs automated DFM checks for CNC Milling, Injection Molding, or Sheet Metal:
+        - DFM_CNC_01: Internal Sharp Corner Inaccessibility (Ø3.0mm endmill check).
+        - DFM_CNC_02: Deep Pocket Depth-to-Width Ratio (Tool deflection / chatter).
+        - DFM_MOLD_01: Missing Mold Draft Angles (1.5° draw angle check).
+        - DFM_MOLD_02: Rib-to-Wall Sink Mark Ratio (60% rule).
+        - DFM_SHEET_01: Minimum Inside Bend Radius (cracking risk).
+        - DFM_SHEET_02: Hole Proximity to Bend Line (ovular distortion risk).
+        """
+        diagnostics: List[Diagnostic] = []
+        dfm_engine = DFMEngine(process or ManufacturingProcess.CNC_MILLING)
+        violations = dfm_engine.evaluate_all_rules(shapes_by_view, process, brep_solid)
+
+        for v in violations:
+            if v.severity == DFMDiagnosticSeverity.ERROR:
+                sev = DiagnosticSeverity.ERROR
+            elif v.severity == DFMDiagnosticSeverity.WARNING:
+                sev = DiagnosticSeverity.WARNING
+            else:
+                sev = DiagnosticSeverity.INFO
+
+            fix_act = v.autofix_payload.get("action") if v.autofix_payload else None
+
+            diagnostics.append(Diagnostic(
+                rule_id=v.rule_id,
+                severity=sev,
+                title=f"[{v.process.value.upper()}] {v.title}",
+                description=v.description,
+                suggestion=v.suggestion,
+                mismatched_shape_ids=[v.target_shape_id] if v.target_shape_id else [],
+                fix_action=fix_act,
+                fix_data=v.autofix_payload
+            ))
 
         return diagnostics

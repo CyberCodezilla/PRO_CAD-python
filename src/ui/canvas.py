@@ -1942,3 +1942,34 @@ class CrossHatchItem(QGraphicsPathItem):
             path.lineTo(p2[0], p2[1])
 
         self.setPath(path)
+
+
+class DFMHeatmapOverlayItem(QGraphicsItemGroup):
+    """
+    Visual DFM Diagnostic Heatmap Halo:
+    - Glowing circular warning/error rings placed over manufacturability defects.
+    - Interactive tooltip displaying remediation suggestions.
+    """
+    def __init__(self, x: float, y: float, severity: str = "error", tooltip: str = "", radius: float = 12.0):
+        super().__init__()
+        self.setPos(x, y)
+        self.setToolTip(tooltip)
+
+        halo_color = QColor('#FF3333') if severity == "error" else QColor('#FF8C00')
+        halo_color.setAlpha(120)
+
+        # Outer ring
+        ring_pen = QPen(halo_color, 2.0, Qt.PenStyle.DashLine)
+        ring_brush = QBrush(QColor(halo_color.red(), halo_color.green(), halo_color.blue(), 40))
+        outer_circle = QGraphicsEllipseItem(-radius, -radius, radius * 2.0, radius * 2.0)
+        outer_circle.setPen(ring_pen)
+        outer_circle.setBrush(ring_brush)
+        self.addToGroup(outer_circle)
+
+        # Center dot
+        dot_pen = QPen(halo_color, 1.0)
+        dot_brush = QBrush(halo_color)
+        inner_dot = QGraphicsEllipseItem(-3.0, -3.0, 6.0, 6.0)
+        inner_dot.setPen(dot_pen)
+        inner_dot.setBrush(dot_brush)
+        self.addToGroup(inner_dot)
